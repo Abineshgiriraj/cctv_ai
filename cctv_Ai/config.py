@@ -48,12 +48,16 @@ class Config:
     COUNT_LINE_Y_RATIO = min(0.95, max(0.05, float(os.getenv("COUNT_LINE_Y_RATIO", 0.62))))
     COUNT_MIN_TRACK_AGE = max(1, int(os.getenv("COUNT_MIN_TRACK_AGE", 3)))
 
-    # XAMPP MySQL defaults can normally use root with a blank password locally.
+    # XAMPP MySQL / phpMyAdmin database.
     DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
     DB_PORT = int(os.getenv("DB_PORT", 3306))
     DB_NAME = os.getenv("DB_NAME", "cctv_ai")
     DB_USER = os.getenv("DB_USER", "root")
     DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+
+    # Kept only because the existing stream_server passes this legacy argument
+    # into TrafficStore. TrafficStore ignores the value and uses the MySQL settings above.
+    ANALYTICS_DB = "mysql"
 
     # Optional custom model files. Keep weights local; *.pt is gitignored.
     HELMET_MODEL = os.getenv("HELMET_MODEL", os.path.join("models", "helmet.pt"))
