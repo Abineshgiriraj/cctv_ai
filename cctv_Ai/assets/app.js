@@ -10,6 +10,48 @@
     });
   });
 
+  function ensureTrafficUi() {
+    if (!q('link[data-traffic-css]')) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'assets/traffic.css';
+      link.dataset.trafficCss = '1';
+      document.head.appendChild(link);
+    }
+    if (q('#traffic-analytics')) return;
+
+    const integration = q('.integration-panel');
+    if (!integration) return;
+    const panel = document.createElement('article');
+    panel.className = 'panel traffic-panel';
+    panel.id = 'traffic-analytics';
+    panel.innerHTML = `
+      <div class="panel-head">
+        <div><h2>Vehicle Counts Today</h2><p>Persistent crossing counts. Each tracked vehicle is counted once when it crosses the AI count line.</p></div>
+        <div><span class="badge live"><i></i> BYTETRACK COUNTER</span></div>
+      </div>
+      <div class="traffic-count-grid">
+        <div class="traffic-count-card"><small>Motorcycle</small><b id="countMotorcycle">0</b><span>Today</span></div>
+        <div class="traffic-count-card"><small>Car</small><b id="countCar">0</b><span>Today</span></div>
+        <div class="traffic-count-card"><small>Bus</small><b id="countBus">0</b><span>Today</span></div>
+        <div class="traffic-count-card"><small>Truck</small><b id="countTruck">0</b><span>Today</span></div>
+        <div class="traffic-count-card"><small>Bicycle</small><b id="countBicycle">0</b><span>Today</span></div>
+        <div class="traffic-count-card"><small>Total vehicles</small><b id="countVehicleTotal">0</b><span>All configured cameras</span></div>
+      </div>
+      <div class="count-line-note">Counting line: <b id="countLineStatus">Loading…</b> · Counts are stored in the backend SQLite analytics database.</div>
+      <div class="panel-head">
+        <div><h2>Advanced Detection Model Readiness</h2><p>These detections require custom trained weights; stock COCO yolov8n.pt cannot reliably detect them.</p></div>
+      </div>
+      <div class="advanced-readiness">
+        <div id="helmetReadiness"><i class="bi bi-person-badge"></i><span><b>Helmet / No Helmet</b><small>Checking model slot…</small></span></div>
+        <div id="roadDamageReadiness"><i class="bi bi-cone-striped"></i><span><b>Road Damage / Pothole</b><small>Checking model slot…</small></span></div>
+        <div id="roadObstructionReadiness"><i class="bi bi-signpost-split"></i><span><b>Fallen Tree / Road Obstruction</b><small>Checking model slot…</small></span></div>
+      </div>`;
+    integration.parentNode.insertBefore(panel, integration);
+  }
+
+  ensureTrafficUi();
+
   function tick() {
     const now = new Date().toLocaleTimeString('en-IN', { hour12: true });
     qa('.camera-clock').forEach((clock) => { clock.textContent = now; });
@@ -58,13 +100,50 @@
       .filter(([, value]) => Number(value) > 0)
       .map(([name, value]) => `${name.replace(/\b\w/g, (c) => c.toUpperCase())}: ${value}`)
       .join('  ·  ');
-    setText(`classCounts${number}`, readable || 'No target objects in the current AI frame');
+    const cumulative = ai?.session_vehicle_counts || {};
+    const cumulativeReadable = Object.entries(cumulative)
+      .filter(([, value]) => Number(value) > 0)
+      .map(([name, value]) => `${name.replace(/\b\w/g, (c) => c.toUpperCase())}: ${value}`)
+      .join(' · ');
+    setText(
+      `classCounts${number}`,
+      `${readable || 'No target objects in current frame'}${cumulativeReadable ? `  |  Session counted: ${cumulativeReadable}` : ''}`
+    );
 
     let aiState = 'Starting';
     if (ai?.last_error) aiState = 'AI Error';
     else if (ai?.has_frame) aiState = 'Tracking';
     else if (ai?.model_loaded) aiState = 'Waiting for frame';
     setText(`aiState${number}`, aiState);
+  }
+
+  function updateTraffic(traffic) {
+    const today = traffic?.today || {};
+    const totals = today?.totals || {};
+    setText('countMotorcycle', Number(totals.motorcycle || 0).toLocaleString('en-IN'));
+    setText('countCar', Number(totals.car || 0).toLocaleString('en-IN'));
+    setText('countBus', Number(totals.bus || 0).toLocaleString('en-IN'));
+    setText('countTruck', Number(totals.truck || 0).toLocaleString('en-IN'));
+    setText('countBicycle', Number(totals.bicycle || 0).toLocaleString('en-IN'));
+    setText('countVehicleTotal', Number(today?.grand_total || 0).toLocaleString('en-IN'));
+    const ratio = Number(traffic?.count_line_y_ratio);
+    const enabled = Boolean(traffic?.counting_enabled);
+    setText('countLineStatus', enabled ? `${Number.isFinite(ratio) ? Math.round(ratio * 100) : '—'}% frame height · enabled` : 'disabled');
+  }
+
+  function setReadiness(id, model) {
+    const el = q(`#${id}`);
+    if (!el) return;
+    const small = q('small', el);
+    const available = Boolean(model?.available);
+    el.classList.toggle('ready', available);
+    if (small) small.textContent = available ? 'Model file found · integration slot ready' : 'Custom .pt model required';
+  }
+
+  function updateAdvancedModels(models) {
+    setReadiness('helmetReadiness', models?.helmet);
+    setReadiness('roadDamageReadiness', models?.road_damage);
+    setReadiness('roadObstructionReadiness', models?.road_obstruction);
   }
 
   function setSystemState(liveCount, total, backendReachable, aiLiveCount, aiErrors) {
@@ -143,12 +222,16 @@
         setCameraState(number, selectedLive ? 'live' : (ai.last_error && mode === 'ai' ? 'offline' : 'pending'), label, Number(st.frames || 0));
         updateAiCard(number, ai);
       });
+      updateTraffic(data?.traffic || {});
+      updateAdvancedModels(data?.advanced_models || {});
       setSystemState(liveCount, total, true, aiLiveCount, aiErrors);
     } catch (_) {
       config.cameraIps.forEach((_, index) => {
         setCameraState(index + 1, 'offline', 'BACKEND OFFLINE', NaN);
         updateAiCard(index + 1, {});
       });
+      updateTraffic({});
+      updateAdvancedModels({});
       setSystemState(0, total, false, 0, 0);
     }
   }
