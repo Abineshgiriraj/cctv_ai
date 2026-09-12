@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+snapshot_test*.jpg
+rtsp_frame.jpg
+event_dump.bin
+success_frame.jpg
+event_frame_*.jpg
+*.pt

@@ -1,0 +1,28 @@
+APPLY TO YOUR CURRENT WORKING FOLDER
+====================================
+
+Target folder:
+D:\XAMPP\htdocs\test\cctv_Ai_UI_Migration_Update\cctv_Ai\
+
+1. Stop stream_server.py (Ctrl+C in its PowerShell window).
+2. Keep your existing .env, .venv and yolov8n.pt. This patch intentionally does
+   NOT include or replace them.
+3. Copy/extract every file and folder from this patch into the target folder.
+4. Choose Replace when Windows asks about stream_server.py, config.py, index.php,
+   detector.py, requirements.txt and assets files.
+5. Start backend again:
+
+   .\.venv\Scripts\python.exe stream_server.py
+
+6. Open:
+   http://127.0.0.1:5000/health
+   http://127.0.0.1:5000/tracked_feed/192.168.0.241
+   http://127.0.0.1:5000/tracked_feed/192.168.0.242
+
+7. Open the CivicVision UI and keep AI Tracking selected.
+
+If ByteTrack reports that LAP is missing, run:
+   .\.venv\Scripts\python.exe -m pip install "lap>=0.5.12"
+
+This patch preserves raw /video_feed endpoints and does not open a second RTSP
+connection for AI.

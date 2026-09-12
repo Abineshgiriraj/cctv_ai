@@ -1,0 +1,52 @@
+CivicVision UI + AI Tracking Integration
+=========================================
+
+Runtime entry points
+--------------------
+Frontend:
+  index.php
+
+Backend:
+  stream_server.py
+
+Camera flow
+-----------
+Each camera keeps ONE RTSP/OpenCV capture thread:
+
+RTSP camera -> OpenCV capture -> raw JPEG -> /video_feed/<camera_ip>
+                           \
+                            -> shared OpenCV frame -> YOLOv8n + ByteTrack
+                                                   -> tracked JPEG
+                                                   -> /tracked_feed/<camera_ip>
+
+The AI code does not open RTSP and does not duplicate camera connections.
+
+AI classes
+----------
+0 person
+1 bicycle
+2 car
+3 motorcycle
+5 bus
+7 truck
+
+Preserved behavior
+------------------
+- Camera IPs/credentials/channel/subtype still come from .env/config.py.
+- /video_feed/<camera_ip> remains the raw MJPEG fallback.
+- /snapshot/<camera_ip> remains the raw snapshot endpoint.
+- Browser still receives MJPEG; no HLS/WebSocket/go2rtc technology was added.
+- Credentials are not sent to browser JavaScript.
+
+Added behavior
+--------------
+- /tracked_feed/<camera_ip>
+- /ai_snapshot/<camera_ip>
+- YOLOv8n object detection
+- ByteTrack temporary tracking IDs
+- per-object confidence labels
+- short movement trails
+- current person and vehicle counts in /health and the UI
+- AI/Raw stream toggle per camera
+
+See AI_TRACKING_README.txt for installation and test steps.
