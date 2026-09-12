@@ -3,3 +3,5 @@ flask
 python-dotenv
 ultralytics
 lap>=0.5.12
+pymysql>=1.1.1
+easyocr>=1.7.2
