@@ -18,6 +18,11 @@ _original_annotate = base._annotate_tracking
 
 def _annotate_with_advanced(camera_ip, frame, result, model, history, last_seen,
                             processed_index, inference_ms, count_state):
+    # Advanced models must run on the original frame. The normal tracker draws
+    # boxes, trails, labels and the count line onto `frame`, which can obscure a
+    # tiny helmet or number plate and reduce detector/OCR accuracy.
+    clean_frame = frame.copy()
+
     persons, vehicles, class_counts = _original_annotate(
         camera_ip,
         frame,
@@ -30,7 +35,14 @@ def _annotate_with_advanced(camera_ip, frame, result, model, history, last_seen,
         count_state,
     )
     try:
-        summary = advanced.process(camera_ip, frame, result, model, processed_index)
+        summary = advanced.process(
+            camera_ip,
+            clean_frame,
+            result,
+            model,
+            processed_index,
+            draw_frame=frame,
+        )
         base.set_ai_status(camera_ip, advanced=summary)
     except Exception as exc:
         log.exception("Advanced detection failed camera=%s: %s", camera_ip, exc)
