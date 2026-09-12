@@ -4,10 +4,12 @@ import os
 import time
 import logging
 import threading
+import uuid
 from collections import defaultdict, deque
-from flask import Flask, Response, abort, jsonify
+from flask import Flask, Response, abort, jsonify, request
 
 from config import Config
+from analytics_store import TrafficStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,12 +31,24 @@ camera_status = {}
 tracked_frames = {}
 ai_status = {}
 
+# Per-camera traffic counting state. Counts are based on ByteTrack IDs crossing
+# a configured horizontal line, not on repeated frame detections.
+traffic_state = {}
+SERVER_SESSION_ID = uuid.uuid4().hex[:16]
+
 lock = threading.Lock()
 # Serialize heavy YOLO inference across cameras so CPU/GPU work cannot starve
 # the RTSP capture threads. Each camera still has its own model/tracker state.
 inference_lock = threading.Lock()
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+try:
+    traffic_store = TrafficStore(Config.ANALYTICS_DB)
+    log.info("Traffic analytics DB ready path=%s session=%s", Config.ANALYTICS_DB, SERVER_SESSION_ID)
+except Exception as exc:
+    traffic_store = None
+    log.exception("Traffic analytics persistence disabled: %s", exc)
 
 
 def allowed_ips():
@@ -48,6 +62,21 @@ def rtsp_url(camera_ip: str) -> str:
         f"rtsp://{user}:{password}@{camera_ip}:554/cam/realmonitor"
         f"?channel={Config.CAMERA_CHANNEL}&subtype={Config.CAMERA_SUBTYPE}"
     )
+
+
+def advanced_model_readiness():
+    models = {
+        "helmet": Config.HELMET_MODEL,
+        "road_damage": Config.ROAD_DAMAGE_MODEL,
+        "road_obstruction": Config.ROAD_OBSTRUCTION_MODEL,
+    }
+    return {
+        name: {
+            "configured_path": path,
+            "available": bool(path and os.path.isfile(path)),
+        }
+        for name, path in models.items()
+    }
 
 
 def set_status(camera_ip: str, **fields):
@@ -80,6 +109,8 @@ def default_ai_row():
         "vehicles": 0,
         "objects": 0,
         "class_counts": {},
+        "session_vehicle_counts": {},
+        "session_vehicle_total": 0,
     }
 
 
@@ -207,23 +238,111 @@ def _draw_label(frame, text, x1, y1, color):
     )
 
 
-def _draw_summary(frame, persons, vehicles, inference_ms):
-    text = f"Persons {persons}   Vehicles {vehicles}   AI {inference_ms:.0f} ms"
+def _draw_summary(frame, persons, vehicles, inference_ms, session_total=0):
+    text = (
+        f"Persons {persons}   Vehicles {vehicles}   "
+        f"Counted {session_total}   AI {inference_ms:.0f} ms"
+    )
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.62
+    scale = 0.58
     thickness = 2
     (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
     overlay = frame.copy()
-    cv2.rectangle(overlay, (12, 12), (min(frame.shape[1] - 12, tw + 34), th + baseline + 30), (7, 18, 29), -1)
+    cv2.rectangle(
+        overlay,
+        (12, 12),
+        (min(frame.shape[1] - 12, tw + 34), th + baseline + 30),
+        (7, 18, 29),
+        -1,
+    )
     cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
     cv2.putText(frame, text, (24, th + 24), font, scale, (44, 223, 255), thickness, cv2.LINE_AA)
 
 
-def _annotate_tracking(frame, result, model, history, last_seen, processed_index, inference_ms):
+def _draw_count_line(frame, line_y):
+    if not Config.COUNTING_ENABLED:
+        return
+    color = (44, 223, 255)
+    cv2.line(frame, (0, line_y), (frame.shape[1] - 1, line_y), color, 2, cv2.LINE_AA)
+    cv2.putText(
+        frame,
+        "VEHICLE COUNT LINE",
+        (12, max(22, line_y - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def _new_traffic_state():
+    return {
+        "previous_centers": {},
+        "track_age": defaultdict(int),
+        "counted_ids": set(),
+        "session_counts": defaultdict(int),
+        "session_total": 0,
+    }
+
+
+def _maybe_count_vehicle(camera_ip, state, *, track_id, cls_id, vehicle_type,
+                         confidence, center, line_y):
+    if not Config.COUNTING_ENABLED or track_id is None or cls_id not in Config.VEHICLE_CLASSES:
+        return
+
+    state["track_age"][track_id] += 1
+    previous = state["previous_centers"].get(track_id)
+    state["previous_centers"][track_id] = center
+
+    if previous is None or track_id in state["counted_ids"]:
+        return
+    if state["track_age"][track_id] < Config.COUNT_MIN_TRACK_AGE:
+        return
+
+    previous_y = previous[1]
+    current_y = center[1]
+    direction = None
+    if previous_y < line_y <= current_y:
+        direction = "down"
+    elif previous_y > line_y >= current_y:
+        direction = "up"
+
+    if direction is None:
+        return
+
+    # Mark immediately so a transient DB error cannot produce repeated counts.
+    state["counted_ids"].add(track_id)
+    state["session_counts"][vehicle_type] += 1
+    state["session_total"] += 1
+
+    stored = False
+    if traffic_store is not None:
+        stored = traffic_store.record_vehicle(
+            session_id=SERVER_SESSION_ID,
+            camera_ip=camera_ip,
+            track_id=track_id,
+            vehicle_type=vehicle_type,
+            direction=direction,
+            confidence=confidence,
+        )
+
+    log.info(
+        "Vehicle counted camera=%s type=%s track=%s direction=%s confidence=%.2f stored=%s",
+        camera_ip,
+        vehicle_type,
+        track_id,
+        direction,
+        confidence,
+        stored,
+    )
+
+
+def _annotate_tracking(camera_ip, frame, result, model, history, last_seen,
+                       processed_index, inference_ms, count_state):
     persons = 0
     vehicles = 0
     class_counts = defaultdict(int)
-    seen_track_ids = set()
 
     # BGR colors chosen to remain visible on common road scenes.
     class_colors = {
@@ -234,6 +353,9 @@ def _annotate_tracking(frame, result, model, history, last_seen, processed_index
         5: (251, 146, 60),    # bus
         7: (244, 114, 182),   # truck
     }
+
+    line_y = int(frame.shape[0] * Config.COUNT_LINE_Y_RATIO)
+    _draw_count_line(frame, line_y)
 
     boxes = getattr(result, "boxes", None)
     if boxes is not None:
@@ -260,8 +382,9 @@ def _annotate_tracking(frame, result, model, history, last_seen, processed_index
             except Exception:
                 track_id = None
 
-            name = _class_name(model, cls_id).upper()
-            class_counts[name.lower()] += 1
+            name = _class_name(model, cls_id)
+            normalized_name = name.lower()
+            class_counts[normalized_name] += 1
             if cls_id == 0:
                 persons += 1
             elif cls_id in Config.VEHICLE_CLASSES:
@@ -270,10 +393,9 @@ def _annotate_tracking(frame, result, model, history, last_seen, processed_index
             color = class_colors.get(cls_id, (44, 223, 255))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             id_text = f" #{track_id}" if track_id is not None else ""
-            _draw_label(frame, f"{name}{id_text} {conf * 100:.0f}%", x1, y1, color)
+            _draw_label(frame, f"{name.upper()}{id_text} {conf * 100:.0f}%", x1, y1, color)
 
             if track_id is not None:
-                seen_track_ids.add(track_id)
                 last_seen[track_id] = processed_index
                 center = ((x1 + x2) // 2, (y1 + y2) // 2)
                 history[track_id].append(center)
@@ -282,13 +404,27 @@ def _annotate_tracking(frame, result, model, history, last_seen, processed_index
                     for p1, p2 in zip(points[:-1], points[1:]):
                         cv2.line(frame, p1, p2, color, 2, cv2.LINE_AA)
 
-    # Keep memory bounded during long-running CCTV sessions.
+                _maybe_count_vehicle(
+                    camera_ip,
+                    count_state,
+                    track_id=track_id,
+                    cls_id=cls_id,
+                    vehicle_type=normalized_name,
+                    confidence=conf,
+                    center=center,
+                    line_y=line_y,
+                )
+
+    # Keep only transient tracking history bounded. counted_ids intentionally remains
+    # for the server session so an occluded track cannot be counted twice.
     stale = [track_id for track_id, seen_at in last_seen.items() if processed_index - seen_at > 90]
     for track_id in stale:
         last_seen.pop(track_id, None)
         history.pop(track_id, None)
+        count_state["previous_centers"].pop(track_id, None)
+        count_state["track_age"].pop(track_id, None)
 
-    _draw_summary(frame, persons, vehicles, inference_ms)
+    _draw_summary(frame, persons, vehicles, inference_ms, count_state["session_total"])
     return persons, vehicles, dict(class_counts)
 
 
@@ -311,7 +447,6 @@ def ai_tracking_worker(camera_ip: str):
     try:
         log.info("Loading YOLO model camera=%s model=%s", camera_ip, Config.YOLO_MODEL)
         model = YOLO(Config.YOLO_MODEL)
-        # Warm-up is intentionally omitted so backend startup stays responsive.
         set_ai_status(camera_ip, model_loaded=True, last_error=None)
         log.info("AI tracker ready camera=%s classes=%s", camera_ip, Config.TARGET_CLASSES)
     except Exception as exc:
@@ -326,6 +461,9 @@ def ai_tracking_worker(camera_ip: str):
     history = defaultdict(lambda: deque(maxlen=Config.TRACK_TRAIL_LENGTH))
     last_seen = {}
     processed_index = 0
+    count_state = _new_traffic_state()
+    with lock:
+        traffic_state[camera_ip] = count_state
 
     while True:
         with lock:
@@ -367,6 +505,7 @@ def ai_tracking_worker(camera_ip: str):
             result = results[0] if results else None
             if result is not None:
                 persons, vehicles, class_counts = _annotate_tracking(
+                    camera_ip,
                     work,
                     result,
                     model,
@@ -374,10 +513,12 @@ def ai_tracking_worker(camera_ip: str):
                     last_seen,
                     processed_index,
                     inference_ms,
+                    count_state,
                 )
             else:
                 persons, vehicles, class_counts = 0, 0, {}
-                _draw_summary(work, persons, vehicles, inference_ms)
+                _draw_count_line(work, int(work.shape[0] * Config.COUNT_LINE_Y_RATIO))
+                _draw_summary(work, persons, vehicles, inference_ms, count_state["session_total"])
 
             ok, encoded = cv2.imencode(
                 ".jpg",
@@ -402,6 +543,8 @@ def ai_tracking_worker(camera_ip: str):
                 row["vehicles"] = vehicles
                 row["objects"] = persons + vehicles
                 row["class_counts"] = class_counts
+                row["session_vehicle_counts"] = dict(count_state["session_counts"])
+                row["session_vehicle_total"] = int(count_state["session_total"])
 
         except Exception as exc:
             msg = f"AI inference failed: {exc}"
@@ -482,11 +625,66 @@ def health():
                     "vehicles": int(ai.get("vehicles") or 0),
                     "objects": int(ai.get("objects") or 0),
                     "class_counts": ai.get("class_counts") or {},
+                    "session_vehicle_counts": ai.get("session_vehicle_counts") or {},
+                    "session_vehicle_total": int(ai.get("session_vehicle_total") or 0),
                 },
             }
+
     live = all(c["has_frame"] for c in cameras.values()) if cameras else False
     ai_live = all(c["ai"]["has_frame"] for c in cameras.values()) if cameras else False
-    return jsonify({"ok": live, "ai_ok": ai_live, "cameras": cameras})
+
+    today_counts = None
+    if traffic_store is not None:
+        try:
+            today_counts = traffic_store.counts()
+        except Exception as exc:
+            log.warning("Unable to read traffic counts: %s", exc)
+
+    return jsonify({
+        "ok": live,
+        "ai_ok": ai_live,
+        "cameras": cameras,
+        "traffic": {
+            "counting_enabled": Config.COUNTING_ENABLED,
+            "count_line_y_ratio": Config.COUNT_LINE_Y_RATIO,
+            "session_id": SERVER_SESSION_ID,
+            "today": today_counts,
+        },
+        "advanced_models": advanced_model_readiness(),
+    })
+
+
+@app.route("/analytics/vehicle_counts")
+def vehicle_counts():
+    if traffic_store is None:
+        return jsonify({"ok": False, "error": "Traffic analytics store is unavailable"}), 503
+
+    event_date = (request.args.get("date") or "").strip() or None
+    camera_ip = (request.args.get("camera_ip") or "").strip() or None
+    if camera_ip and camera_ip not in allowed_ips():
+        abort(404, description="Camera not configured")
+
+    try:
+        data = traffic_store.counts(event_date=event_date, camera_ip=camera_ip)
+        return jsonify({"ok": True, **data})
+    except Exception as exc:
+        log.exception("Vehicle count query failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/analytics/recent_vehicle_events")
+def recent_vehicle_events():
+    if traffic_store is None:
+        return jsonify({"ok": False, "error": "Traffic analytics store is unavailable"}), 503
+    try:
+        limit = int(request.args.get("limit", 25))
+    except ValueError:
+        limit = 25
+    try:
+        return jsonify({"ok": True, "events": traffic_store.recent(limit)})
+    except Exception as exc:
+        log.exception("Recent vehicle event query failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/snapshot/<camera_ip>")
@@ -558,8 +756,10 @@ if __name__ == "__main__":
         t.start()
 
     log.info(
-        "Starting MJPEG + YOLO/ByteTrack server on 0.0.0.0:5000 cameras=%s ai_fps=%s",
+        "Starting MJPEG + YOLO/ByteTrack server on 0.0.0.0:5000 cameras=%s ai_fps=%s counting=%s line=%.2f",
         cameras,
         Config.AI_MAX_FPS,
+        Config.COUNTING_ENABLED,
+        Config.COUNT_LINE_Y_RATIO,
     )
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
