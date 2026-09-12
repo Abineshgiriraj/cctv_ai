@@ -1,18 +1,24 @@
 import json
+import os
 from datetime import datetime
 
 import pymysql
 
 
 class TrafficStore:
-    """Persistent MySQL store for traffic counts, violations and road events."""
+    """Persistent MySQL store for traffic counts, violations and road events.
 
-    def __init__(self, host, port, user, password, database):
-        self.host = host
-        self.port = int(port)
-        self.user = user
-        self.password = password
-        self.database = database
+    The optional first positional argument is accepted for compatibility with the
+    older SQLite-backed stream_server. MySQL connection values are always loaded
+    server-side from environment variables.
+    """
+
+    def __init__(self, _legacy_path=None, host=None, port=None, user=None, password=None, database=None):
+        self.host = host or os.getenv("DB_HOST", "127.0.0.1")
+        self.port = int(port or os.getenv("DB_PORT", 3306))
+        self.user = user or os.getenv("DB_USER", "root")
+        self.password = password if password is not None else os.getenv("DB_PASSWORD", "")
+        self.database = database or os.getenv("DB_NAME", "cctv_ai")
         self._initialize()
 
     def _connect(self):
