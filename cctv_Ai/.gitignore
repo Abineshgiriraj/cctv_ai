@@ -8,3 +8,7 @@ event_dump.bin
 success_frame.jpg
 event_frame_*.jpg
 *.pt
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.sqlite3-*
