@@ -6,6 +6,7 @@ from flask import Response, jsonify, request
 
 import stream_server as base
 from rider_verified_detector import RiderVerifiedDetector
+from road_report_routes import register_road_report_routes
 from config import Config
 
 log = logging.getLogger("mjpeg-mysql")
@@ -154,6 +155,9 @@ def violation_image(violation_id, image_type):
     if not image:
         return jsonify({"ok": False, "error": "Image not found"}), 404
     return Response(image, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+register_road_report_routes(base.app, base.traffic_store, base.allowed_ips, log)
 
 
 @base.app.route("/advanced/status")
