@@ -1,4 +1,6 @@
 import math
+import os
+from collections import defaultdict, deque
 
 from tiled_accuracy_detector import TiledAccuracyDetector
 
@@ -6,10 +8,51 @@ from tiled_accuracy_detector import TiledAccuracyDetector
 class RiderVerifiedDetector(TiledAccuracyDetector):
     """Helmet detector that only evaluates a verified rider on a moving motorcycle.
 
-    This blocks poster/background-face false positives by refusing bike-only helmet
-    decisions. If no rider/person is associated with the motorcycle, helmet status is
-    treated as uncertain and no violation is stored.
+    Background posters and parked motorcycles are rejected before helmet voting.
+    A faster confirmation path is available for real moving riders so useful
+    low-confidence no-helmet observations are not discarded while waiting for
+    the stricter confirmation path.
     """
+
+    def __init__(self, config, store, session_id, log):
+        super().__init__(config, store, session_id, log)
+        self.fast_no_helmet_enabled = os.getenv(
+            "FAST_NO_HELMET_ENABLED", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.fast_no_helmet_min_confidence = min(
+            0.60,
+            max(0.15, float(os.getenv("FAST_NO_HELMET_MIN_CONFIDENCE", "0.28"))),
+        )
+        self.fast_no_helmet_confirm_frames = max(
+            2, min(4, int(os.getenv("FAST_NO_HELMET_CONFIRM_FRAMES", "2")))
+        )
+        self.fast_no_helmet_window = max(
+            self.fast_no_helmet_confirm_frames,
+            min(6, int(os.getenv("FAST_NO_HELMET_WINDOW", "4"))),
+        )
+        self.fast_no_helmet_avg_confidence = min(
+            0.70,
+            max(
+                self.fast_no_helmet_min_confidence,
+                float(os.getenv("FAST_NO_HELMET_AVG_CONFIDENCE", "0.32")),
+            ),
+        )
+        self.fast_helmet_veto_confidence = min(
+            0.95,
+            max(0.35, float(os.getenv("FAST_HELMET_VETO_CONFIDENCE", "0.55"))),
+        )
+        self.fast_helmet_votes = defaultdict(
+            lambda: deque(maxlen=self.fast_no_helmet_window)
+        )
+
+        self.log.info(
+            "Fast rider helmet confirmation enabled=%s min=%.2f avg=%.2f frames=%s window=%s",
+            self.fast_no_helmet_enabled,
+            self.fast_no_helmet_min_confidence,
+            self.fast_no_helmet_avg_confidence,
+            self.fast_no_helmet_confirm_frames,
+            self.fast_no_helmet_window,
+        )
 
     def _moving_bike(self, camera_ip, bike):
         return self._bike_motion_ok(camera_ip, bike)
@@ -28,8 +71,6 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
         bw = max(1.0, bx2 - bx1)
         bh = max(1.0, by2 - by1)
 
-        # Keep the rider tightly related to the motorcycle. This is stricter than
-        # the base association so nearby pedestrians/posters do not become riders.
         horizontal = abs(pcx - bcx) / bw
         vertical = abs(pbottom - by1) / max(1.0, bh)
         if horizontal > 0.75:
@@ -37,6 +78,43 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
         if vertical > 1.8:
             return None
         return rider
+
+    def _clear_fast_votes(self, camera_ip, bike):
+        key = self._track_key(camera_ip, bike)
+        self.fast_helmet_votes[key].clear()
+
+    def _fast_no_helmet_confirmation(self, camera_ip, bike, observation):
+        """Confirm only a person-head no-helmet result on a verified moving bike.
+
+        This path never receives poster/full-frame candidates because the caller has
+        already required a verified rider and `source == person_head`.
+        """
+        if not self.fast_no_helmet_enabled:
+            return None
+
+        key = self._track_key(camera_ip, bike)
+        votes = self.fast_helmet_votes[key]
+        status = observation.get("status")
+        confidence = float(observation.get("confidence") or 0)
+
+        if status == "helmet":
+            if confidence >= self.fast_helmet_veto_confidence:
+                votes.clear()
+            return None
+
+        if status != "no_helmet" or confidence < self.fast_no_helmet_min_confidence:
+            return None
+
+        votes.append(confidence)
+        if len(votes) < self.fast_no_helmet_confirm_frames:
+            return None
+
+        recent = list(votes)[-self.fast_no_helmet_confirm_frames:]
+        average = sum(recent) / len(recent)
+        if average < self.fast_no_helmet_avg_confidence:
+            return None
+
+        return "no_helmet", average, len(recent), len(votes)
 
     def process(self, camera_ip, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
@@ -46,6 +124,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
             "helmet_detected": 0,
             "no_helmet_detected": 0,
             "helmet_violations": 0,
+            "helmet_fast_confirmed": 0,
             "helmet_tile_candidates": 0,
             "helmet_tile_matches": 0,
             "helmet_skipped_no_rider": 0,
@@ -94,20 +173,20 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                         label += " ?"
                     self._draw(draw_frame, plate["box"], label, (255, 160, 0))
 
-                # Critical safety rule: no rider means no helmet decision.
+                # A real rider is mandatory. Posters cannot reach helmet voting.
                 if rider is None:
                     self.helmet_votes[key].clear()
+                    self._clear_fast_votes(camera_ip, bike)
                     summary["helmet_skipped_no_rider"] += 1
                     continue
 
-                # Critical safety rule: stationary/parked motorcycles are ignored.
+                # Parked motorcycles are ignored.
                 if not self._moving_bike(camera_ip, bike):
                     self.helmet_votes[key].clear()
+                    self._clear_fast_votes(camera_ip, bike)
                     summary["helmet_skipped_stationary"] += 1
                     continue
 
-                # First try tiled high-resolution detection, but only against the
-                # verified rider's head region.
                 observation = self._match_tiled_helmet(
                     camera_ip,
                     clean_frame,
@@ -118,20 +197,31 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                 if observation:
                     summary["helmet_tile_matches"] += 1
                 else:
-                    # Fallback is still allowed, but only with a verified rider.
                     observation = self._helmet_status(clean_frame, bike, rider)
 
                 if not observation:
                     continue
 
-                # Refuse any bike-relative fallback result. The final accepted
-                # observation must be person-head based.
+                # Final observations must be inside an associated person's head ROI.
                 if observation.get("source") != "person_head":
                     self.helmet_votes[key].clear()
+                    self._clear_fast_votes(camera_ip, bike)
                     continue
 
                 summary["helmet_checked"] += 1
+
+                # Keep the existing strict confirmation first.
                 confirmation = self._helmet_confirmed(camera_ip, bike, observation)
+
+                # If strict confirmation has not completed, allow a faster decision
+                # only for repeated no-helmet observations on this verified rider.
+                if confirmation is None:
+                    confirmation = self._fast_no_helmet_confirmation(
+                        camera_ip, bike, observation
+                    )
+                    if confirmation is not None:
+                        summary["helmet_fast_confirmed"] += 1
+
                 status = observation["status"]
                 confidence = observation["confidence"]
                 suffix = " ?"
@@ -151,6 +241,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                 if not confirmation:
                     continue
                 if status == "helmet":
+                    self._clear_fast_votes(camera_ip, bike)
                     summary["helmet_detected"] += 1
                     continue
 
@@ -165,6 +256,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                     plate,
                 ):
                     summary["helmet_violations"] += 1
+                    self._clear_fast_votes(camera_ip, bike)
 
         if run_road_ai:
             summary["road_events"] += len(
