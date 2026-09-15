@@ -11,7 +11,7 @@ from config import Config
 log = logging.getLogger("mjpeg-mysql")
 advanced = AdvancedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 
-base.advanced_model_readiness = lambda: AdvancedDetector.readiness(Config)
+base.advanced_model_readiness = advanced.runtime_readiness
 
 _original_annotate = base._annotate_tracking
 
@@ -131,6 +131,11 @@ def violation_image(violation_id, image_type):
     return Response(image, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@base.app.route("/advanced/status")
+def advanced_status():
+    return jsonify({"ok": True, "models": advanced.runtime_readiness()})
+
+
 if __name__ == "__main__":
     cameras = base.allowed_ips()
 
@@ -158,4 +163,5 @@ if __name__ == "__main__":
         Config.DB_PORT,
         Config.DB_NAME,
     )
+    log.info("Advanced AI status: %s", advanced.runtime_readiness())
     base.app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
