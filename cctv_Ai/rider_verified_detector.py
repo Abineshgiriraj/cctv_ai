@@ -1,15 +1,39 @@
-import math
+import os
+
+import cv2
 
 from tiled_accuracy_detector import TiledAccuracyDetector
 
 
 class RiderVerifiedDetector(TiledAccuracyDetector):
-    """Helmet detector that only evaluates a verified rider on a moving motorcycle.
+    """Helmet detector that only stores violations for verified moving riders.
 
-    This blocks poster/background-face false positives by refusing bike-only helmet
-    decisions. If no rider/person is associated with the motorcycle, helmet status is
-    treated as uncertain and no violation is stored.
+    A separate demo-only candidate overlay can be enabled for presentations. Demo
+    candidates may use a motorcycle-relative head crop when the person detector misses
+    the rider, but they are NEVER written to the violations table.
     """
+
+    def __init__(self, config, store, session_id, log):
+        super().__init__(config, store, session_id, log)
+        self.demo_helmet_mode = os.getenv("DEMO_HELMET_MODE", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        self.demo_helmet_min_confidence = min(
+            0.50, max(0.05, float(os.getenv("DEMO_HELMET_MIN_CONFIDENCE", "0.15")))
+        )
+        self.demo_helmet_imgsz = max(
+            640, int(os.getenv("DEMO_HELMET_IMGSZ", "1280"))
+        )
+        self.demo_show_rider_check = os.getenv(
+            "DEMO_SHOW_RIDER_CHECK", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+        self.log.info(
+            "Demo helmet mode=%s candidate_conf>=%.2f imgsz=%s",
+            self.demo_helmet_mode,
+            self.demo_helmet_min_confidence,
+            self.demo_helmet_imgsz,
+        )
 
     def _moving_bike(self, camera_ip, bike):
         return self._bike_motion_ok(camera_ip, bike)
@@ -28,8 +52,6 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
         bw = max(1.0, bx2 - bx1)
         bh = max(1.0, by2 - by1)
 
-        # Keep the rider tightly related to the motorcycle. This is stricter than
-        # the base association so nearby pedestrians/posters do not become riders.
         horizontal = abs(pcx - bcx) / bw
         vertical = abs(pbottom - by1) / max(1.0, bh)
         if horizontal > 0.75:
@@ -37,6 +59,117 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
         if vertical > 1.8:
             return None
         return rider
+
+    def _demo_observation(self, frame, bike, rider=None):
+        """Return a low-threshold display-only helmet candidate.
+
+        This is intentionally isolated from _helmet_confirmed/_store_no_helmet so a
+        weak demo result can never become a real violation record.
+        """
+        if not self.demo_helmet_mode:
+            return None
+        model = self.models.get("helmet")
+        if model is None:
+            return None
+
+        if rider is not None:
+            region = self._head_region(frame, rider.get("box"))
+            source = "demo_person_head"
+        else:
+            region = self._bike_head_region(frame, bike.get("box"))
+            source = "demo_bike_head"
+        if not region:
+            return None
+
+        crop = self._crop(frame, region, 4)
+        if crop is None or crop.size == 0:
+            return None
+
+        h, w = crop.shape[:2]
+        max_side = max(h, w)
+        scale = 5.0 if max_side < 120 else 3.0 if max_side < 220 else 2.0 if max_side < 360 else 1.0
+        source_image = (
+            cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            if scale > 1.0 else crop
+        )
+
+        try:
+            results = model.predict(
+                source_image,
+                conf=self.demo_helmet_min_confidence,
+                imgsz=self.demo_helmet_imgsz,
+                verbose=False,
+            )
+        except Exception as exc:
+            self.log.debug("Demo helmet inference failed: %s", exc)
+            return None
+
+        names = getattr(model, "names", {})
+        candidates = []
+        for result in results or []:
+            boxes = getattr(result, "boxes", None)
+            if boxes is None:
+                continue
+            for box in boxes:
+                try:
+                    cls_id = int(box.cls[0].item())
+                    confidence = float(box.conf[0].item())
+                    raw_name = names.get(cls_id, cls_id) if isinstance(names, dict) else names[cls_id]
+                    status = self._helmet_label(raw_name)
+                    if not status or confidence < self.demo_helmet_min_confidence:
+                        continue
+                    x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
+                    mapped = [
+                        int(region[0] + x1 / scale),
+                        int(region[1] + y1 / scale),
+                        int(region[0] + x2 / scale),
+                        int(region[1] + y2 / scale),
+                    ]
+                    candidates.append({
+                        "status": status,
+                        "confidence": confidence,
+                        "box": mapped,
+                        "source": source,
+                    })
+                except Exception:
+                    continue
+
+        if not candidates:
+            return None
+
+        best_helmet = max(
+            (row for row in candidates if row["status"] == "helmet"),
+            key=lambda row: row["confidence"],
+            default=None,
+        )
+        best_no_helmet = max(
+            (row for row in candidates if row["status"] == "no_helmet"),
+            key=lambda row: row["confidence"],
+            default=None,
+        )
+
+        if best_helmet and best_no_helmet:
+            if best_no_helmet["confidence"] >= best_helmet["confidence"] + 0.05:
+                return best_no_helmet
+            return best_helmet
+        return best_no_helmet or best_helmet
+
+    def _draw_demo_candidate(self, frame, bike, rider=None):
+        observation = self._demo_observation(frame, bike, rider)
+        if observation:
+            if observation["status"] == "no_helmet":
+                label = f"DEMO POSSIBLE NO HELMET {observation['confidence'] * 100:.0f}%"
+                color = (0, 165, 255)
+            else:
+                label = f"DEMO POSSIBLE HELMET {observation['confidence'] * 100:.0f}%"
+                color = (255, 200, 0)
+            self._draw(frame, observation["box"], label, color)
+            return observation
+
+        if self.demo_show_rider_check:
+            box = rider["box"] if rider is not None else bike["box"]
+            self._draw(frame, box, "DEMO HELMET CHECK", (255, 180, 0))
+        return None
 
     def process(self, camera_ip, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
@@ -50,6 +183,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
             "helmet_tile_matches": 0,
             "helmet_skipped_no_rider": 0,
             "helmet_skipped_stationary": 0,
+            "demo_helmet_candidates": 0,
             "plate_detected": 0,
             "plate_read": 0,
             "road_events": 0,
@@ -75,6 +209,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
             for bike in bikes:
                 key = self._track_key(camera_ip, bike)
                 rider = self._verified_rider(persons, bike)
+                moving = self._moving_bike(camera_ip, bike)
 
                 matched_plate = self._match_plate_to_bike(bike["box"], plate_detections)
                 plate = (
@@ -94,20 +229,24 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                         label += " ?"
                     self._draw(draw_frame, plate["box"], label, (255, 160, 0))
 
-                # Critical safety rule: no rider means no helmet decision.
+                # Demo-only path: show low-confidence candidates on moving bikes even
+                # when the person detector misses the rider. Never store these.
+                if self.demo_helmet_mode and moving:
+                    if self._draw_demo_candidate(draw_frame, bike, rider):
+                        summary["demo_helmet_candidates"] += 1
+
+                # Production path remains strict: no verified rider means no stored
+                # helmet decision.
                 if rider is None:
                     self.helmet_votes[key].clear()
                     summary["helmet_skipped_no_rider"] += 1
                     continue
 
-                # Critical safety rule: stationary/parked motorcycles are ignored.
-                if not self._moving_bike(camera_ip, bike):
+                if not moving:
                     self.helmet_votes[key].clear()
                     summary["helmet_skipped_stationary"] += 1
                     continue
 
-                # First try tiled high-resolution detection, but only against the
-                # verified rider's head region.
                 observation = self._match_tiled_helmet(
                     camera_ip,
                     clean_frame,
@@ -118,14 +257,10 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                 if observation:
                     summary["helmet_tile_matches"] += 1
                 else:
-                    # Fallback is still allowed, but only with a verified rider.
                     observation = self._helmet_status(clean_frame, bike, rider)
 
                 if not observation:
                     continue
-
-                # Refuse any bike-relative fallback result. The final accepted
-                # observation must be person-head based.
                 if observation.get("source") != "person_head":
                     self.helmet_votes[key].clear()
                     continue
