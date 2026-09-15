@@ -11,7 +11,32 @@ from config import Config
 log = logging.getLogger("mjpeg-mysql")
 advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 
-base.advanced_model_readiness = advanced.runtime_readiness
+
+def _json_safe(value):
+    """Convert detector/model metadata into values Flask can always jsonify."""
+    try:
+        if hasattr(value, "item"):
+            return _json_safe(value.item())
+        if isinstance(value, dict):
+            return {str(key): _json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_json_safe(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+    except Exception:
+        return str(value)
+
+
+def _safe_runtime_readiness():
+    try:
+        return _json_safe(advanced.runtime_readiness())
+    except Exception as exc:
+        log.exception("Unable to build advanced runtime status: %s", exc)
+        return {"runtime_error": str(exc)}
+
+
+base.advanced_model_readiness = _safe_runtime_readiness
 
 _original_annotate = base._annotate_tracking
 
@@ -133,26 +158,30 @@ def violation_image(violation_id, image_type):
 
 @base.app.route("/advanced/status")
 def advanced_status():
-    status = advanced.runtime_readiness()
+    status = _safe_runtime_readiness()
     status["accuracy_mode"] = {
         "head_only_helmet": True,
         "require_real_rider": True,
         "require_moving_motorcycle": True,
         "bike_only_no_helmet_storage": False,
-        "tiled_helmet_detection": advanced.helmet_tiled_detection,
-        "helmet_tile_columns": advanced.helmet_tile_columns,
-        "helmet_tile_rows": advanced.helmet_tile_rows,
-        "helmet_tile_imgsz": advanced.helmet_tile_imgsz,
-        "helmet_tile_roi_top_ratio": advanced.helmet_tile_roi_top_ratio,
-        "helmet_tile_roi_bottom_ratio": advanced.helmet_tile_roi_bottom_ratio,
-        "helmet_observation_confidence": advanced.helmet_observation_confidence,
-        "strict_no_helmet_min_confidence": advanced.strict_no_helmet_confidence,
-        "strict_no_helmet_confirm_frames": advanced.strict_no_helmet_confirm_frames,
-        "strict_no_helmet_vote_ratio": advanced.helmet_vote_ratio,
-        "road_tiled_inference": True,
-        "road_tile_columns": advanced.road_tile_columns,
+        "tiled_helmet_detection": bool(getattr(advanced, "helmet_tiled_detection", False)),
+        "helmet_tile_columns": getattr(advanced, "helmet_tile_columns", None),
+        "helmet_tile_rows": getattr(advanced, "helmet_tile_rows", None),
+        "helmet_tile_imgsz": getattr(advanced, "helmet_tile_imgsz", None),
+        "helmet_tile_roi_top_ratio": getattr(advanced, "helmet_tile_roi_top_ratio", None),
+        "helmet_tile_roi_bottom_ratio": getattr(advanced, "helmet_tile_roi_bottom_ratio", None),
+        "helmet_observation_confidence": getattr(advanced, "helmet_observation_confidence", None),
+        "strict_no_helmet_min_confidence": getattr(advanced, "strict_no_helmet_confidence", None),
+        "strict_no_helmet_confirm_frames": getattr(advanced, "strict_no_helmet_confirm_frames", None),
+        "strict_no_helmet_vote_ratio": getattr(advanced, "helmet_vote_ratio", None),
+        "road_tiled_inference": hasattr(advanced, "road_tile_columns"),
+        "road_tile_columns": getattr(advanced, "road_tile_columns", None),
     }
-    return jsonify({"ok": True, "models": status})
+    status = _json_safe(status)
+    return jsonify({
+        "ok": "runtime_error" not in status,
+        "models": status,
+    })
 
 
 if __name__ == "__main__":
@@ -182,5 +211,5 @@ if __name__ == "__main__":
         Config.DB_PORT,
         Config.DB_NAME,
     )
-    log.info("Advanced AI status: %s", advanced.runtime_readiness())
+    log.info("Advanced AI status: %s", _safe_runtime_readiness())
     base.app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
