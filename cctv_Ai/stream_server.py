@@ -302,14 +302,11 @@ def _maybe_count_object(camera_ip, state, *, track_id, cls_id, vehicle_type,
 
     previous_y = previous[1]
     current_y = center[1]
-    direction = None
+    direction = "in"
     if previous_y < line_y <= current_y:
         direction = "down"
     elif previous_y > line_y >= current_y:
         direction = "up"
-
-    if direction is None:
-        return
 
     # Mark immediately so a transient DB error cannot produce repeated counts.
     state["counted_ids"].add(track_id)
@@ -669,6 +666,25 @@ def vehicle_counts():
         return jsonify({"ok": True, **data})
     except Exception as exc:
         log.exception("Vehicle count query failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+
+@app.route("/analytics/hourly_counts")
+def hourly_counts():
+    if traffic_store is None:
+        return jsonify({"ok": False, "error": "Traffic analytics store is unavailable"}), 503
+
+    event_date = (request.args.get("date") or "").strip() or None
+    camera_ip = (request.args.get("camera_ip") or "").strip() or None
+    if camera_ip and camera_ip not in allowed_ips():
+        abort(404, description="Camera not configured")
+
+    try:
+        data = traffic_store.hourly_counts(event_date=event_date, camera_ip=camera_ip)
+        return jsonify({"ok": True, **data})
+    except Exception as exc:
+        log.exception("Hourly count query failed: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 

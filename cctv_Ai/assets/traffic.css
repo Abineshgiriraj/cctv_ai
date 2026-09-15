@@ -237,3 +237,9 @@
     background: linear-gradient(90deg, #38bdf8, #818cf8);
     border-radius: 3px;
 }
+
+.card-bicycle .card-icon { background: rgba(34, 211, 238, 0.15); color: #22d3ee; }
+.table-card-full {
+    grid-column: 1 / -1;
+    margin-top: 20px;
+}

@@ -3,7 +3,6 @@
   const qa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const config = window.CCTV_UI_CONFIG || {};
   const baseUrl = config.baseUrl || (config.healthUrl || 'http://127.0.0.1:5000/health').replace('/health', '');
-  const reportApiUrl = config.reportApiUrl || 'report_api.php';
   const cameraIps = Array.isArray(config.cameraIps) ? config.cameraIps : [];
 
   function setText(id, value) {
@@ -179,7 +178,7 @@
 
       updateAdvancedModels(data?.advanced_models || {});
       setSystemState(liveCount, aiLiveCount, aiErrors, true);
-    } catch (_) {
+    } catch (error) {
       cameraIps.forEach((_, index) => setCameraState(index + 1, false, 'BACKEND OFFLINE'));
       setSystemState(0, 0, 0, false);
     }
@@ -214,8 +213,11 @@
       const data = await response.json();
       setText('todayVehicleCount', fmt(data.vehicles));
       setText('todayNoHelmetCount', fmt(data.no_helmet));
+
       const cameraMap = new Map((data.by_camera || []).map((row) => [row.camera_ip, row]));
-      cameraIps.forEach((ip, index) => setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(ip)?.total)));
+      cameraIps.forEach((ip, index) => {
+        setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(ip)?.total));
+      });
     } catch (_) {
       setText('todayVehicleCount', '—');
       setText('todayNoHelmetCount', '—');
@@ -223,7 +225,7 @@
   }
 
   function renderVehicleSummary(summary = {}) {
-    setText('rptTotalVehicles', fmt(summary.total ?? summary.vehicles));
+    setText('rptTotalVehicles', fmt(summary.total));
     setText('rptTotalMotorcycles', fmt(summary.motorcycle));
     setText('rptTotalCars', fmt(summary.car));
     setText('rptTotalBuses', fmt(summary.bus));
@@ -238,20 +240,25 @@
       <td class="number">${fmt(row.bus)}</td>
       <td class="number">${fmt(row.truck)}</td>
       <td class="number">${fmt(row.bicycle)}</td>
-      <td class="number"><b>${fmt(row.total ?? row.vehicles)}</b></td>`;
+      <td class="number"><b>${fmt(row.total)}</b></td>`;
   }
 
   function renderReport(data) {
     renderVehicleSummary(data.summary || {});
+
     const dailyBody = q('#tblDailyReport tbody');
-    if (dailyBody) dailyBody.innerHTML = (data.daily || []).length
-      ? data.daily.map((row) => `<tr><td>${esc(row.date)}</td>${vehicleCells(row)}</tr>`).join('')
-      : '<tr><td colspan="7" class="empty-row">No vehicle crossings found in this period</td></tr>';
+    if (dailyBody) {
+      dailyBody.innerHTML = (data.daily || []).length
+        ? data.daily.map((row) => `<tr><td>${esc(row.date)}</td>${vehicleCells(row)}</tr>`).join('')
+        : '<tr><td colspan="7" class="empty-row">No vehicle crossings found in this period</td></tr>';
+    }
 
     const hourlyBody = q('#tblHourlyReport tbody');
-    if (hourlyBody) hourlyBody.innerHTML = (data.hourly || []).length
-      ? data.hourly.map((row) => `<tr><td>${esc(row.date)}</td><td>${esc(row.hour)}</td>${vehicleCells(row)}</tr>`).join('')
-      : '<tr><td colspan="8" class="empty-row">No hourly vehicle counts in this period</td></tr>';
+    if (hourlyBody) {
+      hourlyBody.innerHTML = (data.hourly || []).length
+        ? data.hourly.map((row) => `<tr><td>${esc(row.date)}</td><td>${esc(row.hour)}</td>${vehicleCells(row)}</tr>`).join('')
+        : '<tr><td colspan="8" class="empty-row">No hourly vehicle counts in this period</td></tr>';
+    }
 
     const cameraBody = q('#tblCameraReport tbody');
     if (cameraBody) {
@@ -262,128 +269,129 @@
     }
   }
 
-  function clearReportTables(message) {
-    const dailyBody = q('#tblDailyReport tbody');
-    const hourlyBody = q('#tblHourlyReport tbody');
-    const cameraBody = q('#tblCameraReport tbody');
-    if (dailyBody) dailyBody.innerHTML = `<tr><td colspan="7" class="empty-row">${esc(message)}</td></tr>`;
-    if (hourlyBody) hourlyBody.innerHTML = `<tr><td colspan="8" class="empty-row">${esc(message)}</td></tr>`;
-    if (cameraBody) cameraBody.innerHTML = `<tr><td colspan="8" class="empty-row">${esc(message)}</td></tr>`;
-  }
-
   async function fetchReportData() {
-    const fromDate = q('#reportFromDate')?.value;
-    const toDate = q('#reportToDate')?.value;
-    const fromTime = q('#reportFromTime')?.value || '00:00';
-    const toTime = q('#reportToTime')?.value || '23:59';
-    const cameraIp = q('#reportCamera')?.value || '';
-    const message = q('#reportMessage');
-    if (!fromDate || !toDate) return;
+    const fromDateEl = q('#reportFromDate') || q('#reportDate');
+    const toDateEl = q('#reportToDate');
+    const fromTimeEl = q('#reportFromTime');
+    const toTimeEl = q('#reportToTime');
+    const cameraEl = q('#reportCamera');
 
-    if (message) {
-      message.className = 'report-message';
-      message.textContent = 'Loading stored MySQL vehicle crossing data...';
-    }
+    const todayStr = new Date().toLocaleDateString('en-CA');
+    if (fromDateEl && !fromDateEl.value) fromDateEl.value = todayStr;
+    if (toDateEl && !toDateEl.value) toDateEl.value = todayStr;
 
-    const params = new URLSearchParams({
-      from_date: fromDate,
-      to_date: toDate,
-      from_time: fromTime,
-      to_time: toTime,
-      camera_ip: cameraIp,
-      t: String(Date.now()),
-    });
+    const fromDate = fromDateEl?.value || todayStr;
+    const toDate = toDateEl?.value || fromDate;
+    const fromTime = fromTimeEl?.value || '00:00';
+    const toTime = toTimeEl?.value || '23:59';
+    const cameraIp = cameraEl?.value || '';
+
+    const baseUrl = config.baseUrl || 'http://127.0.0.1:5000';
+    const url = `${baseUrl}/analytics/report?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&from_time=${encodeURIComponent(fromTime)}&to_time=${encodeURIComponent(toTime)}&camera_ip=${encodeURIComponent(cameraIp)}&t=${Date.now()}`;
 
     try {
-      const response = await fetch(`${reportApiUrl}?${params.toString()}`, { cache: 'no-store' });
-      const raw = await response.text();
-      let data;
-      try {
-        data = JSON.parse(raw);
-      } catch (_) {
-        throw new Error(`Report API returned invalid JSON${raw ? `: ${raw.slice(0, 180)}` : ''}`);
-      }
-      if (!response.ok || !data.ok) throw new Error(data.error || 'Report request failed');
-      renderReport(data);
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Report HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Report query error');
 
-      if (message) {
-        message.className = 'report-message success';
-        const sourceText = data.source === 'daily_vehicle_counts' ? 'daily aggregate records' : 'vehicle crossing events';
-        const note = data.note ? ` ${data.note}` : '';
-        message.textContent = `${fmt(data.summary?.total ?? data.summary?.vehicles)} vehicles loaded from ${sourceText} · ${data.from} to ${data.to}${data.camera_ip ? ` · ${data.camera_ip}` : ' · all cameras'}.${note}`;
+      const summary = data.summary || {};
+      const grandTotal = Number(summary.grand_total || summary.total || 0);
+
+      setText('rptTotalPersons', fmt(summary.person));
+      setText('rptTotalVehicles', fmt(summary.vehicles || summary.total));
+      setText('rptTotalCars', fmt(summary.car));
+      setText('rptTotalMotorcycles', fmt(summary.motorcycle));
+      setText('rptTotalBuses', fmt(summary.bus));
+      setText('rptTotalTrucks', fmt(summary.truck));
+      setText('rptTotalBicycles', fmt(summary.bicycle));
+      setText('rptTotalOther', fmt(summary.other));
+      setText('rptGrandTotal', fmt(grandTotal));
+
+      setText('todayVehicleCount', fmt(summary.vehicles || summary.total));
+
+      const messageEl = q('#reportMessage');
+      if (messageEl) {
+        messageEl.textContent = `Report loaded for ${data.from_date} to ${data.to_date} - Total Objects: ${fmt(grandTotal)}`;
       }
-    } catch (error) {
-      renderVehicleSummary({});
-      clearReportTables('Unable to load report data');
-      if (message) {
-        message.className = 'report-message error';
-        message.textContent = `Report error: ${error.message}`;
+
+      // Render Day-wise Table (#tblDailyReport)
+      const dailyTbody = q('#tblDailyReport tbody');
+      if (dailyTbody) {
+        const rows = data.daily || [];
+        dailyTbody.innerHTML = rows.length
+          ? rows.map((r) => `<tr>
+              <td><b>${esc(r.date)}</b></td>
+              <td>${fmt(r.person)}</td>
+              <td>${fmt(r.car)}</td>
+              <td>${fmt(r.motorcycle)}</td>
+              <td>${fmt(r.bus)}</td>
+              <td>${fmt(r.truck)}</td>
+              <td>${fmt(r.bicycle)}</td>
+              <td><strong class="highlight-total">${fmt(r.grand_total || r.total)}</strong></td>
+            </tr>`).join('')
+          : '<tr><td colspan="8" class="text-center">No vehicle crossings found in this period</td></tr>';
       }
+
+      // Render Time-wise / Hourly Table (#tblHourlyReport)
+      const hourlyTbody = q('#tblHourlyReport tbody') || q('#tblHourlyBreakdown tbody');
+      if (hourlyTbody) {
+        const rows = data.hourly || [];
+        hourlyTbody.innerHTML = rows.length
+          ? rows.map((r) => `<tr>
+              <td>${esc(r.date)}</td>
+              <td><b>${esc(r.hour)}</b></td>
+              <td>${fmt(r.person)}</td>
+              <td>${fmt(r.car)}</td>
+              <td>${fmt(r.motorcycle)}</td>
+              <td>${fmt(r.bus)}</td>
+              <td>${fmt(r.truck)}</td>
+              <td>${fmt(r.bicycle)}</td>
+              <td><strong class="highlight-total">${fmt(r.grand_total || r.total)}</strong></td>
+            </tr>`).join('')
+          : '<tr><td colspan="9" class="text-center">No hourly counts found in this period</td></tr>';
+      }
+
+      // Render Camera-wise Table (#tblCameraReport)
+      const cameraTbody = q('#tblCameraReport tbody') || q('#tblCameraBreakdown tbody');
+      if (cameraTbody) {
+        const rows = data.by_camera || [];
+        cameraTbody.innerHTML = rows.length
+          ? rows.map((r) => {
+              const camIndex = config.cameraIps.indexOf(r.camera_ip);
+              const camName = camIndex >= 0 ? `Camera ${camIndex + 1}` : 'Camera';
+              return `<tr>
+                <td><b>${esc(camName)}</b></td>
+                <td><code>${esc(r.camera_ip)}</code></td>
+                <td>${fmt(r.person)}</td>
+                <td>${fmt(r.car)}</td>
+                <td>${fmt(r.motorcycle)}</td>
+                <td>${fmt(r.bus)}</td>
+                <td>${fmt(r.truck)}</td>
+                <td>${fmt(r.bicycle)}</td>
+                <td><strong class="highlight-total">${fmt(r.grand_total || r.total)}</strong></td>
+              </tr>`;
+            }).join('')
+          : '<tr><td colspan="9" class="text-center">No camera counts found in this period</td></tr>';
+      }
+
+    } catch (err) {
+      console.warn('Report query failed:', err);
     }
   }
 
-  function setTodayFilter() {
-    const today = new Date();
-    const y = today.getFullYear();
-    const m = String(today.getMonth() + 1).padStart(2, '0');
-    const d = String(today.getDate()).padStart(2, '0');
-    const date = `${y}-${m}-${d}`;
-    if (q('#reportFromDate')) q('#reportFromDate').value = date;
-    if (q('#reportToDate')) q('#reportToDate').value = date;
-    if (q('#reportFromTime')) q('#reportFromTime').value = '00:00';
-    if (q('#reportToTime')) q('#reportToTime').value = '23:59';
-    fetchReportData();
-  }
-
-  async function refreshViolations() {
-    const grid = q('#violationsGrid');
-    const status = q('#violationStatus');
-    if (status) {
-      status.className = 'report-message';
-      status.textContent = 'Loading recent confirmed violations...';
-    }
-    try {
-      const response = await fetch(`${baseUrl}/analytics/recent_violations?limit=12&t=${Date.now()}`, { cache: 'no-store' });
-      const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || 'Violation request failed');
-      const rows = data.violations || [];
-      if (grid) {
-        grid.innerHTML = rows.length ? rows.map((row) => {
-          const confidence = Math.round(Number(row.detection_confidence || 0) * 100);
-          const plate = row.plate_number ? esc(row.plate_number) : 'Plate not read';
-          return `<article class="violation-card">
-            <img loading="lazy" src="${baseUrl}/analytics/violation_image/${Number(row.id)}/evidence?t=${Date.now()}" alt="Violation evidence">
-            <div class="violation-body">
-              <b>NO HELMET · ${confidence}%</b>
-              <div class="violation-meta"><span>${esc(row.camera_ip)}</span><span>${esc(row.captured_at)}</span></div>
-              <span class="plate-pill">${plate}</span>
-            </div>
-          </article>`;
-        }).join('') : '<div class="report-message">No confirmed violations recorded yet.</div>';
-      }
-      if (status) {
-        status.className = 'report-message success';
-        status.textContent = rows.length ? `${rows.length} recent violation records loaded.` : 'No confirmed violations recorded yet.';
-      }
-    } catch (error) {
-      if (status) {
-        status.className = 'report-message error';
-        status.textContent = `Violation report error: ${error.message}`;
-      }
-    }
-  }
-
-  q('#btnRefreshReport')?.addEventListener('click', fetchReportData);
-  q('#btnTodayReport')?.addEventListener('click', setTodayFilter);
+  q('#reportFromDate')?.addEventListener('change', fetchReportData);
+  q('#reportToDate')?.addEventListener('change', fetchReportData);
+  q('#reportFromTime')?.addEventListener('change', fetchReportData);
+  q('#reportToTime')?.addEventListener('change', fetchReportData);
   q('#reportCamera')?.addEventListener('change', fetchReportData);
-  q('#btnRefreshViolations')?.addEventListener('click', refreshViolations);
+  q('#btnRefreshReport')?.addEventListener('click', fetchReportData);
+  q('#btnTodayReport')?.addEventListener('click', () => {
+    const todayStr = new Date().toLocaleDateString('en-CA');
+    if (q('#reportFromDate')) q('#reportFromDate').value = todayStr;
+    if (q('#reportToDate')) q('#reportToDate').value = todayStr;
+    fetchReportData();
+  });
 
-  refreshHealth();
-  refreshTodaySummary();
   fetchReportData();
-  refreshViolations();
-
-  setInterval(refreshHealth, 3000);
-  setInterval(refreshTodaySummary, 10000);
-  setInterval(refreshViolations, 30000);
-})();
+  setInterval(fetchReportData, 3000);})();
