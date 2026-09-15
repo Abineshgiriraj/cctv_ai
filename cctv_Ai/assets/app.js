@@ -3,6 +3,7 @@
   const qa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const config = window.CCTV_UI_CONFIG || {};
   const baseUrl = config.baseUrl || (config.healthUrl || 'http://127.0.0.1:5000/health').replace('/health', '');
+  const reportApiUrl = config.reportApiUrl || 'report_api.php';
   const cameraIps = Array.isArray(config.cameraIps) ? config.cameraIps : [];
 
   function setText(id, value) {
@@ -178,7 +179,7 @@
 
       updateAdvancedModels(data?.advanced_models || {});
       setSystemState(liveCount, aiLiveCount, aiErrors, true);
-    } catch (error) {
+    } catch (_) {
       cameraIps.forEach((_, index) => setCameraState(index + 1, false, 'BACKEND OFFLINE'));
       setSystemState(0, 0, 0, false);
     }
@@ -213,11 +214,8 @@
       const data = await response.json();
       setText('todayVehicleCount', fmt(data.vehicles));
       setText('todayNoHelmetCount', fmt(data.no_helmet));
-
       const cameraMap = new Map((data.by_camera || []).map((row) => [row.camera_ip, row]));
-      cameraIps.forEach((ip, index) => {
-        setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(ip)?.total));
-      });
+      cameraIps.forEach((ip, index) => setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(ip)?.total)));
     } catch (_) {
       setText('todayVehicleCount', '—');
       setText('todayNoHelmetCount', '—');
@@ -225,7 +223,7 @@
   }
 
   function renderVehicleSummary(summary = {}) {
-    setText('rptTotalVehicles', fmt(summary.total));
+    setText('rptTotalVehicles', fmt(summary.total ?? summary.vehicles));
     setText('rptTotalMotorcycles', fmt(summary.motorcycle));
     setText('rptTotalCars', fmt(summary.car));
     setText('rptTotalBuses', fmt(summary.bus));
@@ -240,25 +238,20 @@
       <td class="number">${fmt(row.bus)}</td>
       <td class="number">${fmt(row.truck)}</td>
       <td class="number">${fmt(row.bicycle)}</td>
-      <td class="number"><b>${fmt(row.total)}</b></td>`;
+      <td class="number"><b>${fmt(row.total ?? row.vehicles)}</b></td>`;
   }
 
   function renderReport(data) {
     renderVehicleSummary(data.summary || {});
-
     const dailyBody = q('#tblDailyReport tbody');
-    if (dailyBody) {
-      dailyBody.innerHTML = (data.daily || []).length
-        ? data.daily.map((row) => `<tr><td>${esc(row.date)}</td>${vehicleCells(row)}</tr>`).join('')
-        : '<tr><td colspan="7" class="empty-row">No vehicle crossings found in this period</td></tr>';
-    }
+    if (dailyBody) dailyBody.innerHTML = (data.daily || []).length
+      ? data.daily.map((row) => `<tr><td>${esc(row.date)}</td>${vehicleCells(row)}</tr>`).join('')
+      : '<tr><td colspan="7" class="empty-row">No vehicle crossings found in this period</td></tr>';
 
     const hourlyBody = q('#tblHourlyReport tbody');
-    if (hourlyBody) {
-      hourlyBody.innerHTML = (data.hourly || []).length
-        ? data.hourly.map((row) => `<tr><td>${esc(row.date)}</td><td>${esc(row.hour)}</td>${vehicleCells(row)}</tr>`).join('')
-        : '<tr><td colspan="8" class="empty-row">No hourly vehicle counts in this period</td></tr>';
-    }
+    if (hourlyBody) hourlyBody.innerHTML = (data.hourly || []).length
+      ? data.hourly.map((row) => `<tr><td>${esc(row.date)}</td><td>${esc(row.hour)}</td>${vehicleCells(row)}</tr>`).join('')
+      : '<tr><td colspan="8" class="empty-row">No hourly vehicle counts in this period</td></tr>';
 
     const cameraBody = q('#tblCameraReport tbody');
     if (cameraBody) {
@@ -269,6 +262,15 @@
     }
   }
 
+  function clearReportTables(message) {
+    const dailyBody = q('#tblDailyReport tbody');
+    const hourlyBody = q('#tblHourlyReport tbody');
+    const cameraBody = q('#tblCameraReport tbody');
+    if (dailyBody) dailyBody.innerHTML = `<tr><td colspan="7" class="empty-row">${esc(message)}</td></tr>`;
+    if (hourlyBody) hourlyBody.innerHTML = `<tr><td colspan="8" class="empty-row">${esc(message)}</td></tr>`;
+    if (cameraBody) cameraBody.innerHTML = `<tr><td colspan="8" class="empty-row">${esc(message)}</td></tr>`;
+  }
+
   async function fetchReportData() {
     const fromDate = q('#reportFromDate')?.value;
     const toDate = q('#reportToDate')?.value;
@@ -276,11 +278,11 @@
     const toTime = q('#reportToTime')?.value || '23:59';
     const cameraIp = q('#reportCamera')?.value || '';
     const message = q('#reportMessage');
-
     if (!fromDate || !toDate) return;
+
     if (message) {
       message.className = 'report-message';
-      message.textContent = 'Loading stored vehicle crossing data...';
+      message.textContent = 'Loading stored MySQL vehicle crossing data...';
     }
 
     const params = new URLSearchParams({
@@ -293,16 +295,26 @@
     });
 
     try {
-      const response = await fetch(`${baseUrl}/analytics/report?${params.toString()}`, { cache: 'no-store' });
-      const data = await response.json();
+      const response = await fetch(`${reportApiUrl}?${params.toString()}`, { cache: 'no-store' });
+      const raw = await response.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (_) {
+        throw new Error(`Report API returned invalid JSON${raw ? `: ${raw.slice(0, 180)}` : ''}`);
+      }
       if (!response.ok || !data.ok) throw new Error(data.error || 'Report request failed');
       renderReport(data);
+
       if (message) {
         message.className = 'report-message success';
-        message.textContent = `${fmt(data.summary?.total)} vehicles counted from ${data.from} to ${data.to}${data.camera_ip ? ` · ${data.camera_ip}` : ' · all cameras'}.`;
+        const sourceText = data.source === 'daily_vehicle_counts' ? 'daily aggregate records' : 'vehicle crossing events';
+        const note = data.note ? ` ${data.note}` : '';
+        message.textContent = `${fmt(data.summary?.total ?? data.summary?.vehicles)} vehicles loaded from ${sourceText} · ${data.from} to ${data.to}${data.camera_ip ? ` · ${data.camera_ip}` : ' · all cameras'}.${note}`;
       }
     } catch (error) {
       renderVehicleSummary({});
+      clearReportTables('Unable to load report data');
       if (message) {
         message.className = 'report-message error';
         message.textContent = `Report error: ${error.message}`;
