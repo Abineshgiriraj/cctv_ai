@@ -33,7 +33,15 @@ class Config:
     CAMERA_SUBTYPE = int(os.getenv("CAMERA_SUBTYPE", 1))
 
     YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
-    CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.35))
+
+    # Stage 1: permissive candidate threshold used by YOLO + ByteTrack. This lets
+    # distant motorcycles/persons enter the pipeline instead of disappearing
+    # before helmet analysis starts.
+    TRACKING_CANDIDATE_CONFIDENCE = float(
+        os.getenv("TRACKING_CANDIDATE_CONFIDENCE", os.getenv("CONFIDENCE_THRESHOLD", "0.28"))
+    )
+    # Kept for compatibility with older configuration/code.
+    CONFIDENCE_THRESHOLD = TRACKING_CANDIDATE_CONFIDENCE
     IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", 0.45))
     TARGET_CLASSES = _int_list("TARGET_CLASSES", "0,1,2,3,5,7")
     VEHICLE_CLASSES = {1, 2, 3, 5, 7}
@@ -48,6 +56,9 @@ class Config:
     COUNTING_ENABLED = _bool("COUNTING_ENABLED", True)
     COUNT_LINE_Y_RATIO = min(0.95, max(0.05, float(os.getenv("COUNT_LINE_Y_RATIO", 0.62))))
     COUNT_MIN_TRACK_AGE = max(1, int(os.getenv("COUNT_MIN_TRACK_AGE", 3)))
+    # Stage 2: counting remains stricter than candidate detection, so lowering the
+    # tracker threshold does not automatically inflate vehicle reports.
+    COUNT_MIN_CONFIDENCE = float(os.getenv("COUNT_MIN_CONFIDENCE", 0.35))
 
     DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
     DB_PORT = int(os.getenv("DB_PORT", 3306))
@@ -66,11 +77,12 @@ class Config:
     ADVANCED_EVERY_N_FRAMES = max(1, int(os.getenv("ADVANCED_EVERY_N_FRAMES", 3)))
     ADVANCED_CONFIDENCE = float(os.getenv("ADVANCED_CONFIDENCE", 0.40))
 
+    # Stage 3: helmet/no-helmet is decided independently from motorcycle confidence.
     HELMET_CONFIDENCE = float(os.getenv("HELMET_CONFIDENCE", 0.50))
-    NO_HELMET_CONFIDENCE = float(os.getenv("NO_HELMET_CONFIDENCE", 0.58))
+    NO_HELMET_CONFIDENCE = float(os.getenv("NO_HELMET_CONFIDENCE", 0.68))
     HELMET_IMGSZ = max(640, int(os.getenv("HELMET_IMGSZ", 960)))
-    HELMET_CONFIRM_FRAMES = max(1, int(os.getenv("HELMET_CONFIRM_FRAMES", 2)))
-    HELMET_CONFIRM_WINDOW = max(HELMET_CONFIRM_FRAMES, int(os.getenv("HELMET_CONFIRM_WINDOW", 4)))
+    HELMET_CONFIRM_FRAMES = max(1, int(os.getenv("HELMET_CONFIRM_FRAMES", 3)))
+    HELMET_CONFIRM_WINDOW = max(HELMET_CONFIRM_FRAMES, int(os.getenv("HELMET_CONFIRM_WINDOW", 5)))
 
     PLATE_CONFIDENCE = float(os.getenv("PLATE_CONFIDENCE", 0.20))
     PLATE_IMGSZ = max(640, int(os.getenv("PLATE_IMGSZ", 960)))
