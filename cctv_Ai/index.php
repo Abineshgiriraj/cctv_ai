@@ -230,6 +230,6 @@ window.CCTV_UI_CONFIG = {
     cameraIps: <?= json_encode(array_values($camera_ips), JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app.js?v=2"></script>
+<script src="assets/app.js?v=3"></script>
 </body>
 </html>

@@ -106,6 +106,19 @@ class TrafficStore:
                     cur.execute(sql)
             conn.commit()
 
+
+    def _save_image_to_disk(self, prefix, image_bytes):
+        if not image_bytes or not isinstance(image_bytes, bytes):
+            return image_bytes
+        if not image_bytes.startswith(b'\xff\xd8\xff'):
+            return image_bytes
+        import uuid, time, os
+        os.makedirs("data/evidence", exist_ok=True)
+        filename = f"data/evidence/{prefix}_{uuid.uuid4().hex[:8]}_{int(time.time())}.jpg"
+        with open(filename, "wb") as f:
+            f.write(image_bytes)
+        return filename
+
     def record_vehicle(self, *, session_id, camera_ip, track_id, vehicle_type, direction, confidence):
         now = datetime.now()
         sql_event = """
@@ -137,6 +150,8 @@ class TrafficStore:
                          vehicle_track_id=None, person_track_id=None, helmet_status=None,
                          plate_number=None, plate_confidence=None, detection_confidence=0,
                          evidence_image=None, plate_image=None, metadata=None):
+        evidence_image = self._save_image_to_disk("violation", evidence_image)
+        plate_image = self._save_image_to_disk("plate", plate_image)
         now = datetime.now()
         sql = """
             INSERT INTO violations
@@ -157,6 +172,7 @@ class TrafficStore:
 
     def record_road_event(self, *, session_id, camera_ip, event_type, model_label,
                           confidence, evidence_image=None, metadata=None):
+        evidence_image = self._save_image_to_disk("road", evidence_image)
         now = datetime.now()
         sql = """
             INSERT INTO road_events
@@ -556,4 +572,14 @@ class TrafficStore:
             with conn.cursor() as cur:
                 cur.execute(f"SELECT {column} AS image FROM violations WHERE id=%s", (int(violation_id),))
                 row = cur.fetchone()
-        return None if not row else row.get("image")
+        if not row or not row.get("image"):
+            return None
+        img = row.get("image")
+        if isinstance(img, bytes) and img.startswith(b'\xff\xd8\xff'):
+            return img
+        if isinstance(img, bytes):
+            img = img.decode('utf-8')
+        if isinstance(img, str) and os.path.isfile(img):
+            with open(img, "rb") as f:
+                return f.read()
+        return None

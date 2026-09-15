@@ -394,4 +394,61 @@
   });
 
   fetchReportData();
-  setInterval(fetchReportData, 3000);})();
+  setInterval(fetchReportData, 3000);
+  async function fetchViolations() {
+    const statusEl = q('#violationStatus');
+    const gridEl = q('#violationsGrid');
+    if (!gridEl) return;
+
+    try {
+      const response = await fetch(`${baseUrl}/analytics/recent_violations?limit=20&t=${Date.now()}`);
+      if (!response.ok) throw new Error('Failed to fetch violations');
+      const data = await response.json();
+      
+      if (!data.ok || !data.violations || data.violations.length === 0) {
+        if (statusEl) statusEl.textContent = 'No recent violations found.';
+        gridEl.innerHTML = '';
+        return;
+      }
+      
+      if (statusEl) statusEl.style.display = 'none';
+      
+      gridEl.innerHTML = data.violations.map(v => {
+        const hasPlate = !!v.plate_number;
+        const plateBadge = hasPlate ? `<div class="plate-badge">${esc(v.plate_number)}</div>` : '';
+        const timeStr = new Date(v.captured_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+        const dateStr = new Date(v.captured_at).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
+        
+        return `
+          <article class="violation-card">
+            <div class="violation-image">
+              <img src="${baseUrl}/analytics/violation_image/${v.id}/evidence" alt="Violation Evidence" loading="lazy">
+              ${plateBadge}
+            </div>
+            <div class="violation-details">
+              <div>
+                <strong>${esc(v.camera_ip)}</strong>
+                <small>${dateStr} · ${timeStr}</small>
+              </div>
+              <span class="status-chip ${v.helmet_status === 'no_helmet' ? 'danger' : ''}">
+                ${v.helmet_status === 'no_helmet' ? 'NO HELMET' : 'HELMET'}
+              </span>
+            </div>
+          </article>
+        `;
+      }).join('');
+      
+    } catch (err) {
+      console.warn('Violations fetch error:', err);
+      if (statusEl) {
+        statusEl.textContent = 'Error loading violations.';
+        statusEl.style.display = 'block';
+      }
+    }
+  }
+
+  q('#btnRefreshViolations')?.addEventListener('click', fetchViolations);
+  fetchViolations();
+  setInterval(fetchViolations, 5000);
+
+})();
