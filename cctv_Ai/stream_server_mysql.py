@@ -5,11 +5,11 @@ from datetime import datetime
 from flask import Response, jsonify, request
 
 import stream_server as base
-from tiled_accuracy_detector import TiledAccuracyDetector
+from rider_verified_detector import RiderVerifiedDetector
 from config import Config
 
 log = logging.getLogger("mjpeg-mysql")
-advanced = TiledAccuracyDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
+advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 
 base.advanced_model_readiness = advanced.runtime_readiness
 
@@ -136,6 +136,9 @@ def advanced_status():
     status = advanced.runtime_readiness()
     status["accuracy_mode"] = {
         "head_only_helmet": True,
+        "require_real_rider": True,
+        "require_moving_motorcycle": True,
+        "bike_only_no_helmet_storage": False,
         "tiled_helmet_detection": advanced.helmet_tiled_detection,
         "helmet_tile_columns": advanced.helmet_tile_columns,
         "helmet_tile_rows": advanced.helmet_tile_rows,
