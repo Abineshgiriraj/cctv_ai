@@ -5,11 +5,11 @@ from datetime import datetime
 from flask import Response, jsonify, request
 
 import stream_server as base
-from advanced_detection import AdvancedDetector
+from accuracy_detector import AccuracyDetector
 from config import Config
 
 log = logging.getLogger("mjpeg-mysql")
-advanced = AdvancedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
+advanced = AccuracyDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 
 base.advanced_model_readiness = advanced.runtime_readiness
 
@@ -133,7 +133,16 @@ def violation_image(violation_id, image_type):
 
 @base.app.route("/advanced/status")
 def advanced_status():
-    return jsonify({"ok": True, "models": advanced.runtime_readiness()})
+    status = advanced.runtime_readiness()
+    status["accuracy_mode"] = {
+        "head_only_helmet": True,
+        "strict_no_helmet_min_confidence": advanced.strict_no_helmet_confidence,
+        "strict_no_helmet_confirm_frames": advanced.strict_no_helmet_confirm_frames,
+        "strict_no_helmet_vote_ratio": advanced.helmet_vote_ratio,
+        "road_tiled_inference": True,
+        "road_tile_columns": advanced.road_tile_columns,
+    }
+    return jsonify({"ok": True, "models": status})
 
 
 if __name__ == "__main__":
