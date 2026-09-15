@@ -266,7 +266,7 @@ def _draw_count_line(frame, line_y):
     cv2.line(frame, (0, line_y), (frame.shape[1] - 1, line_y), color, 2, cv2.LINE_AA)
     cv2.putText(
         frame,
-        "VEHICLE COUNT LINE",
+        "COUNTING LINE",
         (12, max(22, line_y - 8)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
@@ -286,9 +286,9 @@ def _new_traffic_state():
     }
 
 
-def _maybe_count_vehicle(camera_ip, state, *, track_id, cls_id, vehicle_type,
+def _maybe_count_object(camera_ip, state, *, track_id, cls_id, vehicle_type,
                          confidence, center, line_y):
-    if not Config.COUNTING_ENABLED or track_id is None or cls_id not in Config.VEHICLE_CLASSES:
+    if not Config.COUNTING_ENABLED or track_id is None or cls_id not in Config.COUNTED_CLASSES:
         return
 
     state["track_age"][track_id] += 1
@@ -404,7 +404,7 @@ def _annotate_tracking(camera_ip, frame, result, model, history, last_seen,
                     for p1, p2 in zip(points[:-1], points[1:]):
                         cv2.line(frame, p1, p2, color, 2, cv2.LINE_AA)
 
-                _maybe_count_vehicle(
+                _maybe_count_object(
                     camera_ip,
                     count_state,
                     track_id=track_id,

@@ -179,35 +179,99 @@ class TrafficStore:
             return row_id
 
     def counts(self, *, event_date=None, camera_ip=None):
-        event_date = event_date or datetime.now().date().isoformat()
-        where = ["event_date = %s"]
-        params = [event_date]
+        where = []
+        params = []
+        if event_date and str(event_date).lower() != "all":
+            where.append("event_date = %s")
+            params.append(event_date)
+        elif not event_date:
+            event_date = datetime.now().date().isoformat()
+            where.append("event_date = %s")
+            params.append(event_date)
+
         if camera_ip:
             where.append("camera_ip = %s")
             params.append(camera_ip)
+
+        where_clause = f"WHERE {' AND '.join(where)}" if where else ""
         sql = f"""
-            SELECT camera_ip, vehicle_type, direction, total_count AS total
+            SELECT camera_ip, vehicle_type, direction, SUM(total_count) AS total
             FROM daily_vehicle_counts
-            WHERE {' AND '.join(where)}
+            {where_clause}
+            GROUP BY camera_ip, vehicle_type, direction
             ORDER BY camera_ip, vehicle_type, direction
         """
-        result = {"date": event_date, "camera_ip": camera_ip, "totals": {}, "by_camera": {}, "grand_total": 0}
+        result = {
+            "date": event_date,
+            "camera_ip": camera_ip,
+            "totals": {},
+            "summary": {
+                "persons": 0,
+                "vehicles": 0,
+                "cars": 0,
+                "motorcycles": 0,
+                "buses": 0,
+                "trucks": 0,
+                "other": 0,
+                "grand_total": 0
+            },
+            "by_camera": {},
+            "grand_total": 0
+        }
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
+
         for row in rows:
             cam = row["camera_ip"]
-            vehicle_type = row["vehicle_type"]
+            v_type = str(row["vehicle_type"]).lower()
             direction = row["direction"]
             total = int(row["total"])
-            cam_row = result["by_camera"].setdefault(cam, {"total": 0, "types": {}})
-            type_row = cam_row["types"].setdefault(vehicle_type, {"total": 0, "up": 0, "down": 0})
+
+            cam_row = result["by_camera"].setdefault(cam, {
+                "total": 0,
+                "persons": 0,
+                "vehicles": 0,
+                "cars": 0,
+                "motorcycles": 0,
+                "buses": 0,
+                "trucks": 0,
+                "other": 0,
+                "types": {}
+            })
+            type_row = cam_row["types"].setdefault(v_type, {"total": 0, "up": 0, "down": 0})
             type_row["total"] += total
             type_row[direction] = type_row.get(direction, 0) + total
+
             cam_row["total"] += total
-            result["totals"][vehicle_type] = result["totals"].get(vehicle_type, 0) + total
+            result["totals"][v_type] = result["totals"].get(v_type, 0) + total
             result["grand_total"] += total
+
+            # Categorize into standard report fields
+            if v_type == 'person':
+                result["summary"]["persons"] += total
+                cam_row["persons"] += total
+            else:
+                result["summary"]["vehicles"] += total
+                cam_row["vehicles"] += total
+                if v_type == 'car':
+                    result["summary"]["cars"] += total
+                    cam_row["cars"] += total
+                elif v_type == 'motorcycle':
+                    result["summary"]["motorcycles"] += total
+                    cam_row["motorcycles"] += total
+                elif v_type == 'bus':
+                    result["summary"]["buses"] += total
+                    cam_row["buses"] += total
+                elif v_type == 'truck':
+                    result["summary"]["trucks"] += total
+                    cam_row["trucks"] += total
+                else:
+                    result["summary"]["other"] += total
+                    cam_row["other"] += total
+
+        result["summary"]["grand_total"] = result["grand_total"]
         return result
 
     def recent(self, limit=25):

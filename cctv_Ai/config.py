@@ -37,6 +37,7 @@ class Config:
     IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", 0.45))
     TARGET_CLASSES = _int_list("TARGET_CLASSES", "0,1,2,3,5,7")
     VEHICLE_CLASSES = {1, 2, 3, 5, 7}
+    COUNTED_CLASSES = set(TARGET_CLASSES)
 
     AI_MAX_FPS = float(os.getenv("AI_MAX_FPS", 5))
     YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", 640))

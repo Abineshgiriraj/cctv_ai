@@ -53,7 +53,7 @@ function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 
         <a href="#live-cameras"><i class="bi bi-camera-video"></i><span>Camera Grid</span></a>
         <a href="#stream-status"><i class="bi bi-broadcast"></i><span>Stream Status</span></a>
         <a href="#detections"><i class="bi bi-activity"></i><span>Detections</span></a>
-        <a class="disabled" href="#" aria-disabled="true" tabindex="-1"><i class="bi bi-bar-chart"></i><span>Reports</span><small>Later</small></a>
+        <a href="#reports"><i class="bi bi-bar-chart"></i><span>Reports</span></a>
     </nav>
     <div class="sidebar-foot">
         <div class="secure"><i class="bi bi-shield-check"></i><div><b>Credentials protected</b><small>Loaded server-side from .env</small></div></div>
@@ -149,7 +149,116 @@ function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 
                                 <span><small>INFER FPS</small><b id="aiFps<?= (int)$camera['number'] ?>">—</b></span>
                                 <span><small>RAW FRAMES</small><b id="frameCount<?= (int)$camera['number'] ?>">—</b></span>
                             </div>
-                        </section>
+                            <article class="panel reports-panel" id="reports">
+            <div class="panel-head">
+                <div>
+                    <h2>Traffic & Object Analytics Reports</h2>
+                    <p>Historical object counts stored in MySQL database. Filter by date or camera.</p>
+                </div>
+                <div class="report-controls">
+                    <div class="filter-group">
+                        <label for="reportDate"><i class="bi bi-calendar-event"></i> Date:</label>
+                        <input type="date" id="reportDate" class="report-input" value="<?= e(date('Y-m-d')) ?>">
+                    </div>
+                    <div class="filter-group">
+                        <label for="reportCamera"><i class="bi bi-camera-video"></i> Camera:</label>
+                        <select id="reportCamera" class="report-select">
+                            <option value="">All Cameras</option>
+                            <?php foreach ($cameras as $camera): ?>
+                                <option value="<?= e($camera['ip']) ?>"><?= e($camera['name']) ?> (<?= e($camera['ip']) ?>)</option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <button type="button" id="btnRefreshReport" class="btn-refresh">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Report
+                    </button>
+                </div>
+            </div>
+
+            <div class="reports-stats-grid">
+                <div class="report-card card-person">
+                    <div class="card-icon"><i class="bi bi-person-fill"></i></div>
+                    <div class="card-info"><small>TOTAL PERSONS</small><strong id="rptTotalPersons">0</strong></div>
+                </div>
+                <div class="report-card card-vehicle">
+                    <div class="card-icon"><i class="bi bi-truck-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL VEHICLES</small><strong id="rptTotalVehicles">0</strong></div>
+                </div>
+                <div class="report-card card-car">
+                    <div class="card-icon"><i class="bi bi-car-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL CARS</small><strong id="rptTotalCars">0</strong></div>
+                </div>
+                <div class="report-card card-motorcycle">
+                    <div class="card-icon"><i class="bi bi-bicycle"></i></div>
+                    <div class="card-info"><small>TOTAL MOTORCYCLES</small><strong id="rptTotalMotorcycles">0</strong></div>
+                </div>
+                <div class="report-card card-bus">
+                    <div class="card-icon"><i class="bi bi-bus-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL BUSES</small><strong id="rptTotalBuses">0</strong></div>
+                </div>
+                <div class="report-card card-truck">
+                    <div class="card-icon"><i class="bi bi-truck"></i></div>
+                    <div class="card-info"><small>TOTAL TRUCKS</small><strong id="rptTotalTrucks">0</strong></div>
+                </div>
+                <div class="report-card card-other">
+                    <div class="card-icon"><i class="bi bi-box-seam-fill"></i></div>
+                    <div class="card-info"><small>OTHER OBJECTS</small><strong id="rptTotalOther">0</strong></div>
+                </div>
+                <div class="report-card card-grand">
+                    <div class="card-icon"><i class="bi bi-calculator-fill"></i></div>
+                    <div class="card-info"><small>GRAND TOTAL</small><strong id="rptGrandTotal">0</strong></div>
+                </div>
+            </div>
+
+            <div class="reports-tables-grid">
+                <div class="table-card">
+                    <div class="table-head">
+                        <h3><i class="bi bi-camera-video"></i> Camera-Wise Breakdown</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="report-table" id="tblCameraBreakdown">
+                            <thead>
+                                <tr>
+                                    <th>Camera</th>
+                                    <th>IP Address</th>
+                                    <th>Persons</th>
+                                    <th>Cars</th>
+                                    <th>Motorcycles</th>
+                                    <th>Buses</th>
+                                    <th>Trucks</th>
+                                    <th>Other</th>
+                                    <th>Total Objects</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="9" class="text-center">Loading camera report...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="table-card">
+                    <div class="table-head">
+                        <h3><i class="bi bi-pie-chart"></i> Class-Wise Summary</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="report-table" id="tblClassBreakdown">
+                            <thead>
+                                <tr>
+                                    <th>Object Class</th>
+                                    <th>Total Count</th>
+                                    <th>Percentage</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="3" class="text-center">Loading class summary...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </article>
+    </section>
                     <?php endforeach; ?>
                 </div>
             </article>
@@ -183,7 +292,116 @@ function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 
                             <div><i class="bi bi-stopwatch"></i><span><small>Inference</small><b id="inferenceMs<?= (int)$camera['number'] ?>">—</b></span></div>
                         </div>
                         <p class="class-counts" id="classCounts<?= (int)$camera['number'] ?>">Waiting for detections…</p>
-                    </section>
+                        <article class="panel reports-panel" id="reports">
+            <div class="panel-head">
+                <div>
+                    <h2>Traffic & Object Analytics Reports</h2>
+                    <p>Historical object counts stored in MySQL database. Filter by date or camera.</p>
+                </div>
+                <div class="report-controls">
+                    <div class="filter-group">
+                        <label for="reportDate"><i class="bi bi-calendar-event"></i> Date:</label>
+                        <input type="date" id="reportDate" class="report-input" value="<?= e(date('Y-m-d')) ?>">
+                    </div>
+                    <div class="filter-group">
+                        <label for="reportCamera"><i class="bi bi-camera-video"></i> Camera:</label>
+                        <select id="reportCamera" class="report-select">
+                            <option value="">All Cameras</option>
+                            <?php foreach ($cameras as $camera): ?>
+                                <option value="<?= e($camera['ip']) ?>"><?= e($camera['name']) ?> (<?= e($camera['ip']) ?>)</option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <button type="button" id="btnRefreshReport" class="btn-refresh">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Report
+                    </button>
+                </div>
+            </div>
+
+            <div class="reports-stats-grid">
+                <div class="report-card card-person">
+                    <div class="card-icon"><i class="bi bi-person-fill"></i></div>
+                    <div class="card-info"><small>TOTAL PERSONS</small><strong id="rptTotalPersons">0</strong></div>
+                </div>
+                <div class="report-card card-vehicle">
+                    <div class="card-icon"><i class="bi bi-truck-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL VEHICLES</small><strong id="rptTotalVehicles">0</strong></div>
+                </div>
+                <div class="report-card card-car">
+                    <div class="card-icon"><i class="bi bi-car-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL CARS</small><strong id="rptTotalCars">0</strong></div>
+                </div>
+                <div class="report-card card-motorcycle">
+                    <div class="card-icon"><i class="bi bi-bicycle"></i></div>
+                    <div class="card-info"><small>TOTAL MOTORCYCLES</small><strong id="rptTotalMotorcycles">0</strong></div>
+                </div>
+                <div class="report-card card-bus">
+                    <div class="card-icon"><i class="bi bi-bus-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL BUSES</small><strong id="rptTotalBuses">0</strong></div>
+                </div>
+                <div class="report-card card-truck">
+                    <div class="card-icon"><i class="bi bi-truck"></i></div>
+                    <div class="card-info"><small>TOTAL TRUCKS</small><strong id="rptTotalTrucks">0</strong></div>
+                </div>
+                <div class="report-card card-other">
+                    <div class="card-icon"><i class="bi bi-box-seam-fill"></i></div>
+                    <div class="card-info"><small>OTHER OBJECTS</small><strong id="rptTotalOther">0</strong></div>
+                </div>
+                <div class="report-card card-grand">
+                    <div class="card-icon"><i class="bi bi-calculator-fill"></i></div>
+                    <div class="card-info"><small>GRAND TOTAL</small><strong id="rptGrandTotal">0</strong></div>
+                </div>
+            </div>
+
+            <div class="reports-tables-grid">
+                <div class="table-card">
+                    <div class="table-head">
+                        <h3><i class="bi bi-camera-video"></i> Camera-Wise Breakdown</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="report-table" id="tblCameraBreakdown">
+                            <thead>
+                                <tr>
+                                    <th>Camera</th>
+                                    <th>IP Address</th>
+                                    <th>Persons</th>
+                                    <th>Cars</th>
+                                    <th>Motorcycles</th>
+                                    <th>Buses</th>
+                                    <th>Trucks</th>
+                                    <th>Other</th>
+                                    <th>Total Objects</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="9" class="text-center">Loading camera report...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="table-card">
+                    <div class="table-head">
+                        <h3><i class="bi bi-pie-chart"></i> Class-Wise Summary</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="report-table" id="tblClassBreakdown">
+                            <thead>
+                                <tr>
+                                    <th>Object Class</th>
+                                    <th>Total Count</th>
+                                    <th>Percentage</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="3" class="text-center">Loading class summary...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </article>
+    </section>
                 <?php endforeach; ?>
             </div>
         </article>
@@ -195,6 +413,115 @@ function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 
                 <div><i class="bi bi-check-circle"></i><span><b>No second RTSP connection</b><small>YOLO consumes the same OpenCV frames already captured by stream_server.py</small></span></div>
                 <div><i class="bi bi-check-circle"></i><span><b>Independent camera trackers</b><small>Each camera has separate ByteTrack state and tracking IDs</small></span></div>
                 <div><i class="bi bi-shield-check"></i><span><b>Credentials stay server-side</b><small>Frontend contains camera IPs only; no username or password</small></span></div>
+            </div>
+        </article>
+        <article class="panel reports-panel" id="reports">
+            <div class="panel-head">
+                <div>
+                    <h2>Traffic & Object Analytics Reports</h2>
+                    <p>Historical object counts stored in MySQL database. Filter by date or camera.</p>
+                </div>
+                <div class="report-controls">
+                    <div class="filter-group">
+                        <label for="reportDate"><i class="bi bi-calendar-event"></i> Date:</label>
+                        <input type="date" id="reportDate" class="report-input" value="<?= e(date('Y-m-d')) ?>">
+                    </div>
+                    <div class="filter-group">
+                        <label for="reportCamera"><i class="bi bi-camera-video"></i> Camera:</label>
+                        <select id="reportCamera" class="report-select">
+                            <option value="">All Cameras</option>
+                            <?php foreach ($cameras as $camera): ?>
+                                <option value="<?= e($camera['ip']) ?>"><?= e($camera['name']) ?> (<?= e($camera['ip']) ?>)</option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <button type="button" id="btnRefreshReport" class="btn-refresh">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Report
+                    </button>
+                </div>
+            </div>
+
+            <div class="reports-stats-grid">
+                <div class="report-card card-person">
+                    <div class="card-icon"><i class="bi bi-person-fill"></i></div>
+                    <div class="card-info"><small>TOTAL PERSONS</small><strong id="rptTotalPersons">0</strong></div>
+                </div>
+                <div class="report-card card-vehicle">
+                    <div class="card-icon"><i class="bi bi-truck-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL VEHICLES</small><strong id="rptTotalVehicles">0</strong></div>
+                </div>
+                <div class="report-card card-car">
+                    <div class="card-icon"><i class="bi bi-car-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL CARS</small><strong id="rptTotalCars">0</strong></div>
+                </div>
+                <div class="report-card card-motorcycle">
+                    <div class="card-icon"><i class="bi bi-bicycle"></i></div>
+                    <div class="card-info"><small>TOTAL MOTORCYCLES</small><strong id="rptTotalMotorcycles">0</strong></div>
+                </div>
+                <div class="report-card card-bus">
+                    <div class="card-icon"><i class="bi bi-bus-front-fill"></i></div>
+                    <div class="card-info"><small>TOTAL BUSES</small><strong id="rptTotalBuses">0</strong></div>
+                </div>
+                <div class="report-card card-truck">
+                    <div class="card-icon"><i class="bi bi-truck"></i></div>
+                    <div class="card-info"><small>TOTAL TRUCKS</small><strong id="rptTotalTrucks">0</strong></div>
+                </div>
+                <div class="report-card card-other">
+                    <div class="card-icon"><i class="bi bi-box-seam-fill"></i></div>
+                    <div class="card-info"><small>OTHER OBJECTS</small><strong id="rptTotalOther">0</strong></div>
+                </div>
+                <div class="report-card card-grand">
+                    <div class="card-icon"><i class="bi bi-calculator-fill"></i></div>
+                    <div class="card-info"><small>GRAND TOTAL</small><strong id="rptGrandTotal">0</strong></div>
+                </div>
+            </div>
+
+            <div class="reports-tables-grid">
+                <div class="table-card">
+                    <div class="table-head">
+                        <h3><i class="bi bi-camera-video"></i> Camera-Wise Breakdown</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="report-table" id="tblCameraBreakdown">
+                            <thead>
+                                <tr>
+                                    <th>Camera</th>
+                                    <th>IP Address</th>
+                                    <th>Persons</th>
+                                    <th>Cars</th>
+                                    <th>Motorcycles</th>
+                                    <th>Buses</th>
+                                    <th>Trucks</th>
+                                    <th>Other</th>
+                                    <th>Total Objects</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="9" class="text-center">Loading camera report...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="table-card">
+                    <div class="table-head">
+                        <h3><i class="bi bi-pie-chart"></i> Class-Wise Summary</h3>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="report-table" id="tblClassBreakdown">
+                            <thead>
+                                <tr>
+                                    <th>Object Class</th>
+                                    <th>Total Count</th>
+                                    <th>Percentage</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="3" class="text-center">Loading class summary...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </article>
     </section>

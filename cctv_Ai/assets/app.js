@@ -30,6 +30,7 @@
         <div><span class="badge live"><i></i> MYSQL ANALYTICS</span></div>
       </div>
       <div class="traffic-count-grid">
+        <div class="traffic-count-card"><small>Person</small><b id="countPerson">0</b><span>Today</span></div>
         <div class="traffic-count-card"><small>Motorcycle</small><b id="countMotorcycle">0</b><span>Today</span></div>
         <div class="traffic-count-card"><small>Car</small><b id="countCar">0</b><span>Today</span></div>
         <div class="traffic-count-card"><small>Bus</small><b id="countBus">0</b><span>Today</span></div>
@@ -143,6 +144,7 @@
   function updateTraffic(traffic) {
     const today = traffic?.today || {};
     const totals = today?.totals || {};
+    setText('countPerson', Number(totals.person || 0).toLocaleString('en-IN'));
     setText('countMotorcycle', Number(totals.motorcycle || 0).toLocaleString('en-IN'));
     setText('countCar', Number(totals.car || 0).toLocaleString('en-IN'));
     setText('countBus', Number(totals.bus || 0).toLocaleString('en-IN'));
@@ -207,6 +209,103 @@
     setCameraState(number,'pending',mode==='ai'?'AI STARTING':'CONNECTING',NaN); img.src=`${url}?t=${Date.now()}`; setTimeout(refreshHealth,800);
   };
   window.reconnectCamera=(number)=>{const img=q(`#cameraStream${number}`);if(!img)return;const mode=img.dataset.streamMode||'ai',base=mode==='ai'?img.dataset.aiStreamUrl:img.dataset.rawStreamUrl;setCameraState(number,'pending','RECONNECTING',NaN);img.src=`${base}?t=${Date.now()}`;setTimeout(refreshHealth,1000);};
+
+
+  async function fetchReportData() {
+    const dateInput = q('#reportDate')?.value || '';
+    const cameraIp = q('#reportCamera')?.value || '';
+    const baseUrl = config.healthUrl ? config.healthUrl.replace('/health', '') : 'http://127.0.0.1:5000';
+    const url = `${baseUrl}/analytics/vehicle_counts?date=${encodeURIComponent(dateInput)}&camera_ip=${encodeURIComponent(cameraIp)}&t=${Date.now()}`;
+    
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error('Report query failed');
+      const data = await res.json();
+      
+      const summary = data?.summary || {};
+      const grandTotal = Number(summary.grand_total || data.grand_total || 0);
+      
+      setText('rptTotalPersons', Number(summary.persons || 0).toLocaleString('en-IN'));
+      setText('rptTotalVehicles', Number(summary.vehicles || 0).toLocaleString('en-IN'));
+      setText('rptTotalCars', Number(summary.cars || 0).toLocaleString('en-IN'));
+      setText('rptTotalMotorcycles', Number(summary.motorcycles || 0).toLocaleString('en-IN'));
+      setText('rptTotalBuses', Number(summary.buses || 0).toLocaleString('en-IN'));
+      setText('rptTotalTrucks', Number(summary.trucks || 0).toLocaleString('en-IN'));
+      setText('rptTotalOther', Number(summary.other || 0).toLocaleString('en-IN'));
+      setText('rptGrandTotal', grandTotal.toLocaleString('en-IN'));
+      
+      // Populate Camera-Wise Table
+      const camTbody = q('#tblCameraBreakdown tbody');
+      if (camTbody) {
+        const byCamera = data?.by_camera || {};
+        let html = '';
+        const ipsToRender = cameraIp ? [cameraIp] : config.cameraIps;
+        
+        ipsToRender.forEach((ip, idx) => {
+          const camRow = byCamera[ip] || {};
+          const name = `Camera ${config.cameraIps.indexOf(ip) + 1}`;
+          const persons = Number(camRow.persons || 0);
+          const cars = Number(camRow.cars || 0);
+          const motos = Number(camRow.motorcycles || 0);
+          const buses = Number(camRow.buses || 0);
+          const trucks = Number(camRow.trucks || 0);
+          const other = Number(camRow.other || 0);
+          const total = Number(camRow.total || camRow.grand_total || (persons + cars + motos + buses + trucks + other));
+          
+          html += `<tr>
+            <td><b>${name}</b></td>
+            <td><code>${ip}</code></td>
+            <td>${persons.toLocaleString('en-IN')}</td>
+            <td>${cars.toLocaleString('en-IN')}</td>
+            <td>${motos.toLocaleString('en-IN')}</td>
+            <td>${buses.toLocaleString('en-IN')}</td>
+            <td>${trucks.toLocaleString('en-IN')}</td>
+            <td>${other.toLocaleString('en-IN')}</td>
+            <td><strong class="highlight-total">${total.toLocaleString('en-IN')}</strong></td>
+          </tr>`;
+        });
+        
+        camTbody.innerHTML = html || '<tr><td colspan="9" class="text-center">No data available for selected filter</td></tr>';
+      }
+      
+      // Populate Class-Wise Summary Table
+      const classTbody = q('#tblClassBreakdown tbody');
+      if (classTbody) {
+        const totals = data?.totals || {};
+        const entries = Object.entries(totals).sort((a, b) => Number(b[1]) - Number(a[1]));
+        let html = '';
+        
+        if (entries.length === 0) {
+          html = '<tr><td colspan="3" class="text-center">No objects counted yet</td></tr>';
+        } else {
+          entries.forEach(([clsName, countVal]) => {
+            const count = Number(countVal || 0);
+            const pct = grandTotal > 0 ? ((count / grandTotal) * 100).toFixed(1) : '0.0';
+            const label = clsName.replace(/\b\w/g, c => c.toUpperCase());
+            
+            html += `<tr>
+              <td><b>${label}</b></td>
+              <td>${count.toLocaleString('en-IN')}</td>
+              <td>
+                <div class="progress-bar-cell">
+                  <span>${pct}%</span>
+                  <div class="progress-bar"><div class="progress-fill" style="width: ${pct}%"></div></div>
+                </div>
+              </td>
+            </tr>`;
+          });
+        }
+        classTbody.innerHTML = html;
+      }
+    } catch (err) {
+      console.warn('Report query failed:', err);
+    }
+  }
+
+  q('#reportDate')?.addEventListener('change', fetchReportData);
+  q('#reportCamera')?.addEventListener('change', fetchReportData);
+  q('#btnRefreshReport')?.addEventListener('click', fetchReportData);
+  fetchReportData();
 
   refreshHealth();
   setInterval(refreshHealth,3000);
