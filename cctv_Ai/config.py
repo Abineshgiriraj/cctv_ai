@@ -66,22 +66,23 @@ class Config:
     ADVANCED_EVERY_N_FRAMES = max(1, int(os.getenv("ADVANCED_EVERY_N_FRAMES", 3)))
     ADVANCED_CONFIDENCE = float(os.getenv("ADVANCED_CONFIDENCE", 0.40))
 
-    # Helmet-specific accuracy controls. No-helmet is deliberately stricter
-    # because a false violation is worse than a missed low-confidence frame.
     HELMET_CONFIDENCE = float(os.getenv("HELMET_CONFIDENCE", 0.50))
     NO_HELMET_CONFIDENCE = float(os.getenv("NO_HELMET_CONFIDENCE", 0.58))
     HELMET_IMGSZ = max(640, int(os.getenv("HELMET_IMGSZ", 960)))
     HELMET_CONFIRM_FRAMES = max(1, int(os.getenv("HELMET_CONFIRM_FRAMES", 2)))
     HELMET_CONFIRM_WINDOW = max(HELMET_CONFIRM_FRAMES, int(os.getenv("HELMET_CONFIRM_WINDOW", 4)))
-    HELMET_FULL_FRAME_INTERVAL = max(1, int(os.getenv("HELMET_FULL_FRAME_INTERVAL", 2)))
 
-    # License-plate detector/OCR controls. Small CCTV plates need a lower model
-    # threshold plus larger inference size; OCR still filters weak text.
     PLATE_CONFIDENCE = float(os.getenv("PLATE_CONFIDENCE", 0.20))
     PLATE_IMGSZ = max(640, int(os.getenv("PLATE_IMGSZ", 960)))
     PLATE_OCR_MIN_CONFIDENCE = float(os.getenv("PLATE_OCR_MIN_CONFIDENCE", 0.18))
-    PLATE_RETRY_SECONDS = max(0.5, float(os.getenv("PLATE_RETRY_SECONDS", 1.5)))
     PLATE_CACHE_SECONDS = max(1.0, float(os.getenv("PLATE_CACHE_SECONDS", 8.0)))
+    PLATE_CONFIRM_READS = max(1, int(os.getenv("PLATE_CONFIRM_READS", 2)))
+    PLATE_CONFIRM_WINDOW = max(PLATE_CONFIRM_READS, int(os.getenv("PLATE_CONFIRM_WINDOW", 5)))
+
+    ROAD_DAMAGE_CONFIDENCE = float(os.getenv("ROAD_DAMAGE_CONFIDENCE", 0.25))
+    ROAD_DAMAGE_IMGSZ = max(640, int(os.getenv("ROAD_DAMAGE_IMGSZ", 960)))
+    ROAD_EVERY_N_FRAMES = max(1, int(os.getenv("ROAD_EVERY_N_FRAMES", 5)))
+    ROAD_ROI_TOP_RATIO = min(0.85, max(0.0, float(os.getenv("ROAD_ROI_TOP_RATIO", 0.22))))
 
     VIOLATION_COOLDOWN_SECONDS = max(10, int(os.getenv("VIOLATION_COOLDOWN_SECONDS", 90)))
     ROAD_EVENT_COOLDOWN_SECONDS = max(10, int(os.getenv("ROAD_EVENT_COOLDOWN_SECONDS", 120)))
