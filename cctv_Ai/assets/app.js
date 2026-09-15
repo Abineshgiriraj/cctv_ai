@@ -32,6 +32,14 @@
     });
   });
 
+  let zoomScale = 1;
+  let panX = 0;
+  let panY = 0;
+  let isPanning = false;
+  let startX = 0;
+  let startY = 0;
+  let activeCameraImg = null;
+
   function ensureCameraModal() {
     if (q('#cameraFocusModal')) return;
     const modal = document.createElement('div');
@@ -44,26 +52,87 @@
           <span id="focusCameraIp"></span>
           <button type="button" id="focusClose" aria-label="Close"><i class="bi bi-x-lg"></i></button>
         </div>
-        <div class="camera-focus-body"><img id="focusCameraStream" alt="Focused CCTV stream"></div>
-        <div class="camera-focus-foot"><i class="live-dot"></i><b id="focusCameraMode">AI TRACKING LIVE</b><span>Press Esc to close</span></div>
+        <div class="camera-focus-body" style="overflow: hidden; cursor: grab;">
+            <img id="focusCameraStream" alt="Focused CCTV stream" style="transition: transform 0.1s ease-out; transform-origin: center center;">
+        </div>
+        <div class="camera-focus-foot"><i class="live-dot"></i><b id="focusCameraMode">AI TRACKING LIVE</b><span>Scroll to zoom, drag to pan. Press Esc to close</span></div>
       </div>`;
     document.body.appendChild(modal);
     q('#focusClose')?.addEventListener('click', closeCameraModal);
     modal.addEventListener('click', (event) => { if (event.target === modal) closeCameraModal(); });
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeCameraModal(); });
+    
+    // Zoom and Pan Logic
+    const body = modal.querySelector('.camera-focus-body');
+    const img = modal.querySelector('#focusCameraStream');
+    
+    body.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const zoomIntensity = 0.1;
+        if (e.deltaY < 0) zoomScale += zoomIntensity;
+        else zoomScale -= zoomIntensity;
+        zoomScale = Math.min(Math.max(1, zoomScale), 10);
+        
+        if (zoomScale === 1) {
+            panX = 0;
+            panY = 0;
+        }
+        img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomScale})`;
+    });
+
+    body.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        isPanning = true;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        body.style.cursor = 'grabbing';
+    });
+
+    body.addEventListener('mousemove', (e) => {
+        if (!isPanning || zoomScale === 1) return;
+        panX = e.clientX - startX;
+        panY = e.clientY - startY;
+        img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomScale})`;
+    });
+
+    body.addEventListener('mouseup', () => {
+        isPanning = false;
+        body.style.cursor = 'grab';
+    });
+    body.addEventListener('mouseleave', () => {
+        isPanning = false;
+        body.style.cursor = 'grab';
+    });
   }
 
   function openCameraModal(number) {
     const img = q(`#cameraStream${number}`);
     const card = img?.closest('.operator-camera-card');
     if (!img || !card) return;
+    
+    // Reset zoom and pan
+    zoomScale = 1;
+    panX = 0;
+    panY = 0;
+    const focus = q('#focusCameraStream');
+    if (focus) {
+        focus.style.transform = `translate(0px, 0px) scale(1)`;
+    }
+
+    activeCameraImg = img;
     const mode = img.dataset.streamMode || 'ai';
     const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
     setText('focusCameraTitle', `Camera ${number}`);
     setText('focusCameraIp', card.dataset.cameraIp || '');
     setText('focusCameraMode', mode === 'ai' ? 'AI TRACKING LIVE' : 'RAW LIVE');
-    const focus = q('#focusCameraStream');
-    if (focus) focus.src = `${url}?focus=${Date.now()}`;
+    
+    if (focus) {
+        // Prevent connection limits by clearing background stream
+        img.dataset.pausedSrc = img.src;
+        img.removeAttribute('src');
+        focus.src = url;
+    }
+    
     q('#cameraFocusModal')?.classList.add('open');
     document.body.classList.add('modal-open');
   }
@@ -71,7 +140,15 @@
   function closeCameraModal() {
     q('#cameraFocusModal')?.classList.remove('open');
     document.body.classList.remove('modal-open');
-    q('#focusCameraStream')?.removeAttribute('src');
+    
+    const focus = q('#focusCameraStream');
+    if (focus) focus.removeAttribute('src');
+    
+    // Restore background stream
+    if (activeCameraImg && activeCameraImg.dataset.pausedSrc) {
+        activeCameraImg.src = activeCameraImg.dataset.pausedSrc;
+        activeCameraImg = null;
+    }
   }
 
   ensureCameraModal();

@@ -1,148 +1,105 @@
 import math
 import os
 import time
-from collections import Counter
-
+from collections import Counter, defaultdict, deque
 import cv2
 
 from advanced_detection import AdvancedDetector
 
 
 class AccuracyDetector(AdvancedDetector):
-    """Precision-first detector with recall support for high-angle CCTV."""
-
     def __init__(self, config, store, session_id, log):
         super().__init__(config, store, session_id, log)
 
-        # Candidate observations and final decisions are intentionally separate.
-        # Distant rider heads often produce 30-70% model confidence. If those
-        # observations are discarded before voting, a real no-helmet rider can
-        # never become confirmed even when the model sees the same result across
-        # several consecutive frames.
-        self.helmet_observation_confidence = min(
-            0.60,
-            max(0.10, float(os.getenv("HELMET_OBSERVATION_CONFIDENCE", "0.30"))),
-        )
+        self.helmet_observation_confidence = float(os.getenv("HELMET_OBSERVATION_CONFIDENCE", "0.25"))
+        self.no_helmet_final_avg_confidence = float(os.getenv("NO_HELMET_FINAL_AVG_CONFIDENCE", "0.48"))
+        self.strict_no_helmet_vote_ratio = float(os.getenv("STRICT_NO_HELMET_VOTE_RATIO", "0.60"))
+        
+        self.helmet_confirm_frames = int(os.getenv("HELMET_CONFIRM_FRAMES", "3"))
+        self.helmet_confirm_window = int(os.getenv("HELMET_CONFIRM_WINDOW", "7"))
+        
+        self.helmet_conflict_margin = 0.12
 
-        # Existing strict values remain useful as a "strong frame" signal, but
-        # they are no longer used as the minimum confidence for every vote.
-        self.strict_no_helmet_confidence = max(
-            float(getattr(config, "NO_HELMET_CONFIDENCE", 0.58)),
-            float(os.getenv("STRICT_NO_HELMET_MIN_CONFIDENCE", "0.68")),
-        )
-        self.strict_no_helmet_confirm_frames = max(
-            int(getattr(config, "HELMET_CONFIRM_FRAMES", 2)),
-            int(os.getenv("STRICT_NO_HELMET_CONFIRM_FRAMES", "3")),
-        )
-        self.helmet_vote_ratio = min(
-            1.0,
-            max(0.5, float(os.getenv("STRICT_NO_HELMET_VOTE_RATIO", "0.75"))),
-        )
-        self.helmet_conflict_margin = max(
-            0.0, float(os.getenv("HELMET_CONFLICT_MARGIN", "0.12"))
-        )
+        self.road_tile_overlap = 0.18
+        self.road_tile_columns = max(1, min(3, int(os.getenv("ROAD_TILE_COLUMNS", "2"))))
+        self.road_display_confidence = 0.12
+        
+        self._bike_motion_state = {}
+        self.helmet_tile_min_bike_motion_px = 8.0
+        
+        self.helmet_votes = defaultdict(lambda: deque(maxlen=self.helmet_confirm_window))
+        self.log.info("AccuracyDetector initialized with multi-frame tracking logic.")
 
-        self.no_helmet_final_avg_confidence = min(
-            self.strict_no_helmet_confidence,
-            max(
-                self.helmet_observation_confidence,
-                float(os.getenv("NO_HELMET_FINAL_AVG_CONFIDENCE", "0.56")),
-            ),
-        )
+    def _bike_motion_ok(self, camera_ip, bike):
+        key = self._track_key(camera_ip, bike)
+        x1, y1, x2, y2 = bike["box"]
+        center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        state = self._bike_motion_state.get(key)
+        if state is None:
+            self._bike_motion_state[key] = {
+                "origin": center,
+                "last": center,
+                "max_displacement": 0.0,
+            }
+            return self.helmet_tile_min_bike_motion_px <= 0
 
-        self.fallback_no_helmet_confidence = max(
-            self.strict_no_helmet_confidence,
-            float(os.getenv("FALLBACK_NO_HELMET_CONFIDENCE", "0.74")),
-        )
-        self.fallback_confirm_frames = max(
-            self.strict_no_helmet_confirm_frames,
-            int(os.getenv("FALLBACK_NO_HELMET_CONFIRM_FRAMES", "3")),
-        )
-        self.fallback_vote_ratio = min(
-            1.0,
-            max(0.60, float(os.getenv("FALLBACK_NO_HELMET_VOTE_RATIO", "0.80"))),
-        )
-        self.fallback_final_avg_confidence = min(
-            self.fallback_no_helmet_confidence,
-            max(
-                self.helmet_observation_confidence,
-                float(os.getenv("FALLBACK_NO_HELMET_FINAL_AVG_CONFIDENCE", "0.60")),
-            ),
-        )
-
-        self.road_tile_overlap = min(
-            0.40, max(0.05, float(os.getenv("ROAD_TILE_OVERLAP", "0.18")))
-        )
-        self.road_tile_columns = max(
-            1, min(3, int(os.getenv("ROAD_TILE_COLUMNS", "2")))
-        )
-        self.road_display_confidence = min(
-            float(getattr(config, "ROAD_DAMAGE_CONFIDENCE", 0.25)),
-            max(0.05, float(os.getenv("ROAD_DISPLAY_CONFIDENCE", "0.12"))),
-        )
-
-        self.log.info(
-            "Accuracy mode: helmet_observation>=%.2f rider_final_avg>=%.2f "
-            "rider_strong>=%.2f fallback_final_avg>=%.2f fallback_strong>=%.2f "
-            "confirm=%s fallback_confirm=%s road_tiles=%s",
-            self.helmet_observation_confidence,
-            self.no_helmet_final_avg_confidence,
-            self.strict_no_helmet_confidence,
-            self.fallback_final_avg_confidence,
-            self.fallback_no_helmet_confidence,
-            self.strict_no_helmet_confirm_frames,
-            self.fallback_confirm_frames,
-            self.road_tile_columns,
-        )
+        ox, oy = state["origin"]
+        displacement = math.hypot(center[0] - ox, center[1] - oy)
+        state["last"] = center
+        state["max_displacement"] = max(state["max_displacement"], displacement)
+        return state["max_displacement"] >= self.helmet_tile_min_bike_motion_px
 
     @staticmethod
-    def _head_region(frame, person_box):
-        if person_box is None:
-            return None
-        h, w = frame.shape[:2]
-        px1, py1, px2, py2 = [int(v) for v in person_box]
-        pw = max(1, px2 - px1)
-        ph = max(1, py2 - py1)
-        x1 = px1 - int(pw * 0.22)
-        x2 = px2 + int(pw * 0.22)
-        y1 = py1 - int(ph * 0.12)
-        y2 = py1 + int(ph * 0.46)
-        return [max(0, x1), max(0, y1), min(w, x2), min(h, y2)]
-
-    @staticmethod
-    def _bike_head_region(frame, bike_box):
+    def _expanded_bike_region(frame, bike_box, person_box=None):
         h, w = frame.shape[:2]
         bx1, by1, bx2, by2 = [int(v) for v in bike_box]
+        if person_box:
+            px1, py1, px2, py2 = [int(v) for v in person_box]
+            bx1 = min(bx1, px1)
+            by1 = min(by1, py1)
+            bx2 = max(bx2, px2)
+            by2 = max(by2, py2)
         bw = max(1, bx2 - bx1)
         bh = max(1, by2 - by1)
-        cx = (bx1 + bx2) / 2.0
-        x1 = int(cx - bw * 0.62)
-        x2 = int(cx + bw * 0.62)
-        y1 = int(by1 - bh * 1.60)
-        y2 = int(by1 + bh * 0.18)
-        return [max(0, x1), max(0, y1), min(w, x2), min(h, y2)]
+        pad_x = int(bw * 0.40)
+        pad_top = int(bh * 0.50)
+        pad_bottom = int(bh * 0.20)
+        return [max(0, bx1 - pad_x), max(0, by1 - pad_top), min(w, bx2 + pad_x), min(h, by2 + pad_bottom)]
 
-    def _helmet_threshold_for(self, status, source):
-        if status != "no_helmet":
-            return float(self.cfg.HELMET_CONFIDENCE)
-        if source == "bike_fallback":
-            return self.fallback_final_avg_confidence
-        return self.no_helmet_final_avg_confidence
+    @staticmethod
+    def _is_head_in_bounds(head_box, bike_box, person_box):
+        hx1, hy1, hx2, hy2 = head_box
+        hcx = (hx1 + hx2) / 2.0
+        hcy = (hy1 + hy2) / 2.0
+        
+        # We check if the center of the head box falls reasonably within the top part of the person or bike
+        if person_box:
+            px1, py1, px2, py2 = person_box
+            pw = px2 - px1
+            if (px1 - pw*0.3) <= hcx <= (px2 + pw*0.3) and (py1 - 50) <= hcy <= py2:
+                return True
+        
+        bx1, by1, bx2, by2 = bike_box
+        bw = bx2 - bx1
+        bh = by2 - by1
+        # Allow heads to be above the bike bounding box (by up to 1.5x bike height) and horizontally within it
+        if (bx1 - bw*0.5) <= hcx <= (bx2 + bw*0.5) and (by1 - bh*1.5) <= hcy <= by2:
+            return True
+            
+        return False
 
-    def _helmet_threshold(self, status):
-        return self._helmet_threshold_for(status, "person_head")
-
-    def _helmet_status(self, frame, bike, person):
+    def _helmet_status(self, camera_ip, frame, bike, person):
         model = self.models.get("helmet")
         if model is None:
             return None
+            
+        if not self._bike_motion_ok(camera_ip, bike):
+            return None
 
-        if person is not None:
-            region = self._head_region(frame, person.get("box"))
-            source_name = "person_head"
-        else:
-            region = self._bike_head_region(frame, bike.get("box"))
-            source_name = "bike_fallback"
+        bike_box = bike.get("box")
+        person_box = person.get("box") if person else None
+        region = self._expanded_bike_region(frame, bike_box, person_box)
+        source_name = "bike_person_combo"
 
         if region is None:
             return None
@@ -150,40 +107,18 @@ class AccuracyDetector(AdvancedDetector):
         if crop is None or crop.size == 0:
             return None
 
-        ch, cw = crop.shape[:2]
-        max_side = max(ch, cw)
-        scale = (
-            6.0 if max_side < 90
-            else 4.5 if max_side < 140
-            else 3.0 if max_side < 220
-            else 2.0 if max_side < 360
-            else 1.0
-        )
-        source = (
-            cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            if scale > 1.0 else crop
-        )
+        source = crop
+        scale = 1.0
 
-        # This is deliberately a candidate threshold. Final acceptance happens
-        # only after multi-frame voting in _helmet_confirmed().
         try:
-            results = model.predict(
-                source,
-                conf=self.helmet_observation_confidence,
-                imgsz=int(self.cfg.HELMET_IMGSZ),
-                verbose=False,
-            )
+            results = model.predict(source, conf=self.helmet_observation_confidence,
+                                    imgsz=640, verbose=False)
         except Exception as exc:
-            self.log.debug("Helmet ROI inference failed: %s", exc)
+            self.log.error(f"Helmet predict error: {exc}")
             return None
 
         candidates = {"helmet": [], "no_helmet": []}
         names = getattr(model, "names", {})
-        rcx = (region[0] + region[2]) / 2.0
-        rcy = (region[1] + region[3]) / 2.0
-        rw = max(1.0, region[2] - region[0])
-        rh = max(1.0, region[3] - region[1])
-
         for result in results or []:
             boxes = getattr(result, "boxes", None)
             if boxes is None:
@@ -194,44 +129,37 @@ class AccuracyDetector(AdvancedDetector):
                     confidence = float(box.conf[0].item())
                     raw_name = names.get(cls_id, cls_id) if isinstance(names, dict) else names[cls_id]
                     status = self._helmet_label(raw_name)
+                    
                     if not status or confidence < self.helmet_observation_confidence:
                         continue
+                        
                     x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
                     mapped = [
-                        int(region[0] + x1 / scale),
-                        int(region[1] + y1 / scale),
-                        int(region[0] + x2 / scale),
-                        int(region[1] + y2 / scale),
+                        int(region[0] + x1 / scale), int(region[1] + y1 / scale),
+                        int(region[0] + x2 / scale), int(region[1] + y2 / scale)
                     ]
-                    dcx = (mapped[0] + mapped[2]) / 2.0
-                    dcy = (mapped[1] + mapped[3]) / 2.0
-                    distance = abs(dcx - rcx) / rw + abs(dcy - rcy) / rh
+                    
+                    if not self._is_head_in_bounds(mapped, bike_box, person_box):
+                        self.log.info(f"Rejected out-of-bounds helmet detection on bike={bike.get('track_id')}")
+                        continue
+                        
+                    self.log.info(f"Observed on bike={bike.get('track_id')}: {raw_name} -> {status} (conf={confidence:.2f})")
+
                     candidates[status].append({
                         "status": status,
                         "confidence": confidence,
                         "box": mapped,
                         "search_box": region,
                         "source": source_name,
-                        "rank": confidence - 0.10 * distance,
                     })
                 except Exception:
                     continue
 
-        best_helmet = max(
-            candidates["helmet"], key=lambda row: row["rank"], default=None
-        )
-        best_no_helmet = max(
-            candidates["no_helmet"], key=lambda row: row["rank"], default=None
-        )
+        best_helmet = max(candidates["helmet"], key=lambda row: row["confidence"], default=None)
+        best_no_helmet = max(candidates["no_helmet"], key=lambda row: row["confidence"], default=None)
 
         if best_helmet and best_no_helmet:
-            # A meaningful helmet observation remains a safety veto unless the
-            # no-helmet observation is clearly stronger on the same head ROI.
-            if (
-                best_helmet["confidence"] >= self.helmet_observation_confidence
-                and best_no_helmet["confidence"]
-                < best_helmet["confidence"] + self.helmet_conflict_margin
-            ):
+            if best_helmet["confidence"] >= self.helmet_observation_confidence and best_no_helmet["confidence"] < best_helmet["confidence"] + self.helmet_conflict_margin:
                 return best_helmet
             return best_no_helmet
         return best_helmet or best_no_helmet
@@ -239,234 +167,145 @@ class AccuracyDetector(AdvancedDetector):
     def _helmet_confirmed(self, camera_ip, bike, observation):
         key = self._track_key(camera_ip, bike)
         votes = self.helmet_votes[key]
-        source = observation.get("source", "person_head")
-        votes.append((observation["status"], observation["confidence"], source))
-
+        votes.append((observation["status"], observation["confidence"]))
+        
         status = observation["status"]
-        same = [
-            (conf, vote_source)
-            for vote_status, conf, vote_source in votes
-            if vote_status == status
-        ]
+        same = [conf for vote_status, conf in votes if vote_status == status]
+        
         if not same:
             return None
 
+        # self.log.info(f"Bike {bike.get('track_id')} votes: {votes}")
+
         if status == "no_helmet":
-            fallback_track = source == "bike_fallback"
-            required = (
-                self.fallback_confirm_frames
-                if fallback_track
-                else self.strict_no_helmet_confirm_frames
-            )
-            required_ratio = (
-                self.fallback_vote_ratio if fallback_track else self.helmet_vote_ratio
-            )
-            final_average_threshold = (
-                self.fallback_final_avg_confidence
-                if fallback_track
-                else self.no_helmet_final_avg_confidence
-            )
-            strong_frame_threshold = (
-                self.fallback_no_helmet_confidence
-                if fallback_track
-                else self.strict_no_helmet_confidence
-            )
-
-            if len(votes) < required or len(same) < required:
+            if len(votes) < self.helmet_confirm_frames or len(same) < self.helmet_confirm_frames:
+                self.log.info(f"Bike {bike.get('track_id')} NH rejected: Not enough frames (votes={len(votes)}, same={len(same)})")
                 return None
-            if len(same) / max(1, len(votes)) < required_ratio:
+            ratio = len(same) / max(1, len(votes))
+            if ratio < self.strict_no_helmet_vote_ratio:
+                self.log.info(f"Bike {bike.get('track_id')} NH rejected: Ratio {ratio:.2f} < {self.strict_no_helmet_vote_ratio}")
                 return None
 
-            # Any clear helmet observation on the same recent track vetoes a
-            # violation. Weak/conflicting tracks remain visible as '?' only.
-            strong_helmet = [
-                conf
-                for vote_status, conf, _ in votes
-                if vote_status == "helmet"
-                and conf >= float(self.cfg.HELMET_CONFIDENCE) + 0.08
-            ]
-            if strong_helmet:
-                return None
-
-            scores = [conf for conf, _ in same]
+            scores = [conf for conf in same]
             average = sum(scores) / len(scores)
-            if average < final_average_threshold:
+            if average < self.no_helmet_final_avg_confidence:
+                self.log.info(f"Bike {bike.get('track_id')} NH rejected: Avg conf {average:.2f} < {self.no_helmet_final_avg_confidence}")
                 return None
-
-            # For a fast 3-frame decision require at least one strong frame.
-            # Otherwise allow four consistent moderate observations to confirm.
-            strong_frames = [score for score in scores if score >= strong_frame_threshold]
-            if not strong_frames and len(same) < max(4, required):
-                return None
+                
         else:
             required = max(2, int(self.cfg.HELMET_CONFIRM_FRAMES))
             if len(same) < required:
                 return None
-            scores = [conf for conf, _ in same]
+            scores = [conf for conf in same]
             average = sum(scores) / len(scores)
             if average < float(self.cfg.HELMET_CONFIDENCE):
                 return None
 
-        counts = Counter(vote_status for vote_status, _, _ in votes)
+        counts = Counter(vote_status for vote_status, _ in votes)
         if counts.most_common(1)[0][0] != status:
             return None
+            
+        self.log.info(f"Bike {bike.get('track_id')} CONFIRMED {status} (avg={average:.2f})")
         return status, average, len(same), len(votes)
 
-    @staticmethod
-    def _iou(box_a, box_b):
-        ax1, ay1, ax2, ay2 = box_a
-        bx1, by1, bx2, by2 = box_b
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
-        inter = iw * ih
-        if inter <= 0:
-            return 0.0
-        area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
-        area_b = max(1, (bx2 - bx1) * (by2 - by1))
-        return inter / float(area_a + area_b - inter)
+    def process(self, camera_ip, clean_frame, primary_result, primary_model,
+                processed_index, draw_frame=None):
+        draw_frame = draw_frame if draw_frame is not None else clean_frame
+        summary = {
+            "helmet_checked": 0, "helmet_detected": 0, "no_helmet_detected": 0,
+            "helmet_violations": 0, "plate_detected": 0, "plate_read": 0, "road_events": 0,
+        }
+        if not self.cfg.ADVANCED_DETECTION_ENABLED or primary_result is None:
+            return summary
 
-    def _road_tiles(self, frame):
-        road, y_offset = self._road_roi(frame)
-        _, rw = road.shape[:2]
-        columns = self.road_tile_columns
-        if columns <= 1 or rw < 900:
-            return [(road, 0, y_offset)]
-        tile_width = int(math.ceil(rw / columns))
-        overlap = int(tile_width * self.road_tile_overlap)
-        tiles = []
-        for index in range(columns):
-            x1 = max(0, index * tile_width - (overlap if index else 0))
-            x2 = min(
-                rw,
-                (index + 1) * tile_width
-                + (overlap if index < columns - 1 else 0),
-            )
-            tile = road[:, x1:x2]
-            if tile.size:
-                tiles.append((tile, x1, y_offset))
-        return tiles
+        run_rider_ai = processed_index % self.cfg.ADVANCED_EVERY_N_FRAMES == 0
+        run_road_ai = processed_index % self.cfg.ROAD_EVERY_N_FRAMES == 0
 
-    def _run_road_model(self, camera_ip, frame, model_key, event_type, draw_frame=None):
-        model = self.models.get(model_key)
-        if model is None:
-            return []
+        if run_rider_ai:
+            persons, bikes = self._primary_objects(primary_result, primary_model)
+            plate_detections = self._detect_plates_frame(clean_frame) if "plate" in self.models and bikes else []
 
-        store_threshold = (
-            float(self.cfg.ROAD_DAMAGE_CONFIDENCE)
-            if model_key == "road_damage"
-            else float(self.cfg.ADVANCED_CONFIDENCE)
-        )
-        infer_threshold = (
-            self.road_display_confidence
-            if model_key == "road_damage"
-            else store_threshold
-        )
-        detections = []
-        for source, x_offset, y_offset in self._road_tiles(frame):
-            try:
-                results = model.predict(
-                    source,
-                    conf=infer_threshold,
-                    imgsz=int(self.cfg.ROAD_DAMAGE_IMGSZ),
-                    verbose=False,
-                )
-            except Exception as exc:
-                self.log.debug("%s tiled inference failed: %s", model_key, exc)
-                continue
+            for bike in bikes:
+                rider = self._best_rider(persons, bike)
+                matched_plate = self._match_plate_to_bike(bike["box"], plate_detections)
+                plate = self._plate_consensus(camera_ip, bike, matched_plate) if matched_plate else None
+                
+                if matched_plate: summary["plate_detected"] += 1
+                if plate:
+                    label = "PLATE"
+                    if plate.get("confirmed") and plate.get("text"):
+                        label += f" {plate['text']}"
+                        summary["plate_read"] += 1
+                    elif plate.get("raw_text"):
+                        label += f" ? {plate['raw_text']}"
+                    else:
+                        label += " ?"
+                    self._draw(draw_frame, plate["box"], label, (255, 160, 0))
 
-            names = getattr(model, "names", {})
-            for result in results or []:
-                boxes = getattr(result, "boxes", None)
-                if boxes is None:
+                observation = self._helmet_status(camera_ip, clean_frame, bike, rider)
+                
+                track_id = bike.get("track_id")
+                if track_id is not None:
+                    key = self._track_key(camera_ip, bike)
+                    votes = self.helmet_votes.get(key, [])
+                    no_helmet_votes = sum(1 for v in votes if v[0] == "no_helmet")
+                    helmet_votes = sum(1 for v in votes if v[0] == "helmet")
+                    
+                    debug_lines = [
+                        f"BIKE #{track_id}",
+                        f"Rider: {'YES' if rider else 'NO'}",
+                        f"Obs: {len(votes)} (N:{no_helmet_votes} H:{helmet_votes})"
+                    ]
+                    
+                    if no_helmet_votes > 0:
+                        nh_confs = [v[1] for v in votes if v[0] == "no_helmet"]
+                        avg = sum(nh_confs) / len(nh_confs)
+                        debug_lines.append(f"No-Hel Avg: {avg*100:.0f}%")
+                    
+                    bx1, by1, _, _ = bike["box"]
+                    dy = max(10, by1 - 70)
+                    for line in debug_lines:
+                        cv2.putText(draw_frame, line, (bx1, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+                        dy += 15
+                
+                if not observation:
                     continue
-                for box in boxes:
-                    try:
-                        cls_id = int(box.cls[0].item())
-                        confidence = float(box.conf[0].item())
-                        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
-                        full_box = [
-                            x1 + x_offset,
-                            y1 + y_offset,
-                            x2 + x_offset,
-                            y2 + y_offset,
-                        ]
-                        label = str(
-                            names.get(cls_id, cls_id)
-                            if isinstance(names, dict)
-                            else names[cls_id]
-                        )
-                    except Exception:
-                        continue
-                    detections.append({
-                        "label": label,
-                        "confidence": confidence,
-                        "box": full_box,
-                    })
+                summary["helmet_checked"] += 1
+                
+                confirmation = self._helmet_confirmed(camera_ip, bike, observation)
+                status = observation["status"]
+                confidence = observation["confidence"]
+                
+                if confirmation:
+                    status, confidence, _, _ = confirmation
+                    suffix = ""
+                    if track_id is not None:
+                        bx1, by1, _, _ = bike["box"]
+                        cv2.putText(draw_frame, f"Final: {status.upper()}", (bx1, dy), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+                else:
+                    suffix = " ?"
 
-        detections.sort(key=lambda row: row["confidence"], reverse=True)
-        kept = []
-        for detection in detections:
-            if any(
-                detection["label"] == existing["label"]
-                and self._iou(detection["box"], existing["box"]) >= 0.45
-                for existing in kept
-            ):
-                continue
-            kept.append(detection)
+                color = (0, 0, 255) if status == "no_helmet" else (0, 220, 80)
+                label = "NO HELMET" if status == "no_helmet" else "HELMET"
+                self._draw(draw_frame, observation["box"], f"{label}{suffix} {confidence * 100:.0f}%", color)
 
-        events = []
-        for detection in kept:
-            label = detection["label"]
-            confidence = detection["confidence"]
-            full_box = detection["box"]
-            confirmed = confidence >= store_threshold
-            if draw_frame is not None:
-                prefix = "ROAD" if confirmed else "ROAD?"
-                self._draw(
-                    draw_frame,
-                    full_box,
-                    f"{prefix} {label.upper()} {confidence * 100:.0f}%",
-                    (0, 165, 255) if confirmed else (0, 210, 255),
-                )
+                if not confirmation:
+                    continue
+                if status == "helmet":
+                    summary["helmet_detected"] += 1
+                    continue
+                    
+                summary["no_helmet_detected"] += 1
+                
+                stored = self._store_no_helmet(camera_ip, clean_frame, bike, rider, confirmation, observation["search_box"], plate)
+                if stored:
+                    summary["helmet_violations"] += 1
+                    self.log.info(f"Bike {track_id} violation STORED.")
+                else:
+                    self.log.info(f"Bike {track_id} violation NOT stored (cooldown or error).")
 
-            if not confirmed or self.store is None:
-                continue
-            cx = (full_box[0] + full_box[2]) // 2
-            cy = (full_box[1] + full_box[3]) // 2
-            spatial_key = (
-                camera_ip,
-                event_type,
-                label.lower(),
-                int(cx / 160),
-                int(cy / 120),
-            )
-            now = time.time()
-            if (
-                now - self.last_road_event[spatial_key]
-                < self.cfg.ROAD_EVENT_COOLDOWN_SECONDS
-            ):
-                continue
-            self.last_road_event[spatial_key] = now
-            crop = self._crop(frame, full_box, 30)
-            event_id = self.store.record_road_event(
-                session_id=self.session_id,
-                camera_ip=camera_ip,
-                event_type=event_type,
-                model_label=label,
-                confidence=confidence,
-                evidence_image=self._jpeg(crop if crop is not None else frame),
-                metadata={
-                    "box": full_box,
-                    "road_roi_top_ratio": self.cfg.ROAD_ROI_TOP_RATIO,
-                    "tiled_inference": True,
-                    "tile_columns": self.road_tile_columns,
-                },
-            )
-            events.append({
-                "id": event_id,
-                "label": label,
-                "confidence": confidence,
-                "box": full_box,
-            })
-        return events
+        if run_road_ai:
+            summary["road_events"] += len(self._run_road_model(camera_ip, clean_frame, "road_damage", "road_damage", draw_frame=draw_frame))
+            summary["road_events"] += len(self._run_road_model(camera_ip, clean_frame, "road_obstruction", "road_obstruction", draw_frame=draw_frame))
+
+        return summary

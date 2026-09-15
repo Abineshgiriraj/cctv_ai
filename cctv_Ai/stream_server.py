@@ -56,10 +56,19 @@ def allowed_ips():
 
 
 def rtsp_url(camera_ip: str) -> str:
-    user = urllib.parse.quote(Config.CAMERA_USERNAME)
-    password = urllib.parse.quote(Config.CAMERA_PASSWORD)
+    user = Config.CAMERA_USERNAME
+    password = Config.CAMERA_PASSWORD
+    
+    # Use different credentials for the new cameras
+    if camera_ip in ["192.168.0.252", "192.168.0.246", "192.168.0.253", "192.168.0.249"]:
+        user = "admin"
+        password = "Iccc@789"
+        
+    user_quoted = urllib.parse.quote(user)
+    password_quoted = urllib.parse.quote(password)
+    
     return (
-        f"rtsp://{user}:{password}@{camera_ip}:554/cam/realmonitor"
+        f"rtsp://{user_quoted}:{password_quoted}@{camera_ip}:554/cam/realmonitor"
         f"?channel={Config.CAMERA_CHANNEL}&subtype={Config.CAMERA_SUBTYPE}"
     )
 

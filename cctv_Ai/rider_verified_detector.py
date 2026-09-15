@@ -1,9 +1,9 @@
 import math
 
-from tiled_accuracy_detector import TiledAccuracyDetector
+from accuracy_detector import AccuracyDetector
 
 
-class RiderVerifiedDetector(TiledAccuracyDetector):
+class RiderVerifiedDetector(AccuracyDetector):
     """Helmet detector that only evaluates a verified rider on a moving motorcycle.
 
     This blocks poster/background-face false positives by refusing bike-only helmet
@@ -67,9 +67,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
                 self._detect_plates_frame(clean_frame)
                 if "plate" in self.models and bikes else []
             )
-            tiled_helmet_detections = (
-                self._detect_tiled_helmets(clean_frame) if bikes else []
-            )
+            tiled_helmet_detections = []
             summary["helmet_tile_candidates"] = len(tiled_helmet_detections)
 
             for bike in bikes:
@@ -108,13 +106,7 @@ class RiderVerifiedDetector(TiledAccuracyDetector):
 
                 # First try tiled high-resolution detection, but only against the
                 # verified rider's head region.
-                observation = self._match_tiled_helmet(
-                    camera_ip,
-                    clean_frame,
-                    bike,
-                    rider,
-                    tiled_helmet_detections,
-                )
+                observation = None
                 if observation:
                     summary["helmet_tile_matches"] += 1
                 else:
