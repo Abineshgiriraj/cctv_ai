@@ -5,11 +5,11 @@ from datetime import datetime
 from flask import Response, jsonify, request
 
 import stream_server as base
-from accuracy_detector import AccuracyDetector
+from tiled_accuracy_detector import TiledAccuracyDetector
 from config import Config
 
 log = logging.getLogger("mjpeg-mysql")
-advanced = AccuracyDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
+advanced = TiledAccuracyDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 
 base.advanced_model_readiness = advanced.runtime_readiness
 
@@ -136,6 +136,13 @@ def advanced_status():
     status = advanced.runtime_readiness()
     status["accuracy_mode"] = {
         "head_only_helmet": True,
+        "tiled_helmet_detection": advanced.helmet_tiled_detection,
+        "helmet_tile_columns": advanced.helmet_tile_columns,
+        "helmet_tile_rows": advanced.helmet_tile_rows,
+        "helmet_tile_imgsz": advanced.helmet_tile_imgsz,
+        "helmet_tile_roi_top_ratio": advanced.helmet_tile_roi_top_ratio,
+        "helmet_tile_roi_bottom_ratio": advanced.helmet_tile_roi_bottom_ratio,
+        "helmet_observation_confidence": advanced.helmet_observation_confidence,
         "strict_no_helmet_min_confidence": advanced.strict_no_helmet_confidence,
         "strict_no_helmet_confirm_frames": advanced.strict_no_helmet_confirm_frames,
         "strict_no_helmet_vote_ratio": advanced.helmet_vote_ratio,
