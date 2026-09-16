@@ -29,7 +29,7 @@ def _image_bytes(value):
     return None
 
 
-def register_road_report_routes(app, store, allowed_ips, log):
+def register_road_report_routes(app, store, allowed_keys, log):
     @app.route('/analytics/road_report')
     def road_report():
         if store is None:
@@ -45,13 +45,15 @@ def register_road_report_routes(app, store, allowed_ips, log):
         except ValueError:
             limit = 250
 
-        if camera_key and camera_key not in allowed_ips():
+        if camera_key and camera_key not in allowed_keys():
             return jsonify({'ok': False, 'error': 'Camera not configured'}), 404
 
+        # Existing databases keep the unique camera key in camera_ip for backward
+        # compatibility. Alias it back to camera_key in the API response.
         where = ['event_date BETWEEN %s AND %s', "event_type='road_damage'"]
         params = [from_date, to_date]
         if camera_key:
-            where.append('camera_key=%s')
+            where.append('camera_ip=%s')
             params.append(camera_key)
         if label:
             where.append('model_label=%s')
@@ -59,8 +61,8 @@ def register_road_report_routes(app, store, allowed_ips, log):
         params.append(limit)
 
         sql = f"""
-            SELECT id, camera_key, event_type, model_label, confidence, captured_at,
-                   event_date, metadata_json
+            SELECT id, camera_ip AS camera_key, event_type, model_label, confidence,
+                   captured_at, event_date, metadata_json
             FROM road_events
             WHERE {' AND '.join(where)}
             ORDER BY captured_at DESC
@@ -77,7 +79,7 @@ def register_road_report_routes(app, store, allowed_ips, log):
             return jsonify({'ok': False, 'error': str(exc)}), 500
 
         high = medium = low = 0
-        cameras = set()
+        camera_set = set()
         events = []
         for row in rows:
             level = damage_level(row.get('model_label'))
@@ -87,11 +89,13 @@ def register_road_report_routes(app, store, allowed_ips, log):
                 medium += 1
             else:
                 low += 1
-            cameras.add(row.get('camera_key'))
+            key = row.get('camera_key')
+            camera_set.add(key)
             captured = row.get('captured_at')
             events.append({
                 'id': int(row['id']),
-                'camera_ip': row.get('camera_key'),
+                'camera_key': key,
+                'camera_ip': key,
                 'event_type': row.get('event_type'),
                 'model_label': row.get('model_label'),
                 'damage_level': level,
@@ -111,7 +115,7 @@ def register_road_report_routes(app, store, allowed_ips, log):
                 'high': high,
                 'medium': medium,
                 'low': low,
-                'cameras': len(cameras),
+                'cameras': len(camera_set),
             },
             'events': events,
         })
