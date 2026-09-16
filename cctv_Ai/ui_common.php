@@ -82,6 +82,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
         'reports' => ['reports.php', 'bi-bar-chart-line', 'Vehicle Reports'],
         'violations' => ['violations.php', 'bi-exclamation-triangle', 'Helmet Violations'],
         'road' => ['road_damage.php', 'bi-cone-striped', 'Road Damage'],
+        'incidents' => ['incidents.php', 'bi-car-front-fill', 'Incidents'],
     ];
     ?>
 <!doctype html>
