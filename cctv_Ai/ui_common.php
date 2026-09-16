@@ -151,3 +151,5 @@ window.CCTV_UI_CONFIG = {
 <?php endforeach; ?>
 </body>
 </html>
+<?php
+}

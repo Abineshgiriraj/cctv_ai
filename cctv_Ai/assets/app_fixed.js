@@ -189,6 +189,77 @@
   q('#btnRefreshReport')?.addEventListener('click', fetchReportData);
   q('#btnRefreshViolations')?.addEventListener('click', fetchViolations);
 
+  // Lightbox feature
+  const lightbox = document.createElement('div');
+  lightbox.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:9999;display:none;align-items:center;justify-content:center;flex-direction:column;';
+  
+  const imgContainer = document.createElement('div');
+  imgContainer.style.cssText = 'width:90%;height:90%;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;';
+  
+  const lightboxImg = document.createElement('img');
+  lightboxImg.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;transition:transform 0.2s ease;cursor:grab;';
+  
+  const hint = document.createElement('div');
+  hint.style.cssText = 'color:#aaa;margin-top:15px;font-family:sans-serif;font-size:12px;';
+  hint.textContent = 'Scroll to zoom in/out. Click outside to close.';
+  
+  imgContainer.appendChild(lightboxImg);
+  lightbox.appendChild(imgContainer);
+  lightbox.appendChild(hint);
+  document.body.appendChild(lightbox);
+
+  let scale = 1;
+  let isDragging = false;
+  let startX, startY, translateX = 0, translateY = 0;
+
+  const updateTransform = () => {
+    lightboxImg.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+  };
+
+  window.openLightbox = (url) => {
+    lightboxImg.src = url;
+    scale = 1; translateX = 0; translateY = 0;
+    updateTransform();
+    lightbox.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+  };
+
+  document.addEventListener('click', e => {
+    if (e.target.matches('.violation-card img, .violation-image img, .road-evidence-card img')) {
+      window.openLightbox(e.target.src);
+    } else if (e.target === lightbox || e.target === imgContainer) {
+      lightbox.style.display = 'none';
+      document.body.style.overflow = '';
+    }
+  });
+
+  imgContainer.addEventListener('wheel', e => {
+    e.preventDefault();
+    scale += e.deltaY * -0.002;
+    scale = Math.min(Math.max(0.5, scale), 5);
+    updateTransform();
+  });
+
+  lightboxImg.addEventListener('mousedown', e => {
+    isDragging = true;
+    startX = e.clientX - translateX;
+    startY = e.clientY - translateY;
+    lightboxImg.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', e => {
+    if (!isDragging) return;
+    translateX = e.clientX - startX;
+    translateY = e.clientY - startY;
+    updateTransform();
+  });
+
+  window.addEventListener('mouseup', () => {
+    isDragging = false;
+    lightboxImg.style.cursor = 'grab';
+  });
+
   refreshHealth();
   refreshTodaySummary();
   fetchReportData();
