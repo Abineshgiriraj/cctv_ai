@@ -15,7 +15,7 @@ render_page_start('road', 'Road Damage Monitoring', 'Detected road defects with 
     <div class="report-filter-grid">
         <div class="report-field"><label for="roadFromDate">FROM DATE</label><input type="date" id="roadFromDate" value="<?= e($today) ?>"></div>
         <div class="report-field"><label for="roadToDate">TO DATE</label><input type="date" id="roadToDate" value="<?= e($today) ?>"></div>
-        <div class="report-field"><label for="roadCamera">CAMERA / AREA</label><select id="roadCamera"><option value="">All Cameras</option><?php foreach ($cameras as $camera): ?><option value="<?= e($camera['camera_key']) ?>"><?= e($camera['name'] . ' · ' . $camera['area']) ?></option><?php endforeach; ?></select></div>
+        <div class="report-field"><label for="roadCamera">CAMERA / AREA</label><select id="roadCamera"><option value="">All Cameras</option><?php foreach ($cameras as $camera): ?><option value="<?= e($camera['ip']) ?>"><?= e($camera['name'] . ' · ' . $camera['area']) ?></option><?php endforeach; ?></select></div>
         <div class="report-field"><label for="roadLabel">DAMAGE TYPE</label><select id="roadLabel"><option value="">All Types</option><option value="Pothole">Pothole</option><option value="Alligator Crack">Alligator Crack</option><option value="Longitudinal Crack">Longitudinal Crack</option><option value="Transverse Crack">Transverse Crack</option><option value="Other">Other</option></select></div>
         <div class="report-actions"><button type="button" class="secondary" id="roadToday">Today</button><button type="button" class="primary" id="roadApply"><i class="bi bi-search"></i> Apply</button></div>
     </div>
@@ -40,4 +40,4 @@ render_page_start('road', 'Road Damage Monitoring', 'Detected road defects with 
     </section>
 </div>
 
-<?php render_page_end(['assets/road.js?v=2']); ?>
+<?php render_page_end(['assets/road.js?v=1']); ?>

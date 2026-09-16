@@ -26,29 +26,6 @@ function load_env_file(string $path): array {
     return $env;
 }
 
-function env_truthy(array $env, string $key, bool $default = false): bool {
-    if (!array_key_exists($key, $env)) return $default;
-    return in_array(strtolower(trim((string)$env[$key])), ['1', 'true', 'yes', 'on'], true);
-}
-
-function make_camera_row(string $ip, int $channel, string $name, string $area, string $stream_base): ?array {
-    $ip = trim($ip, " \t\n\r\0\x0B\"'");
-    if ($ip === '') return null;
-    $channel = max(1, $channel);
-    $name = trim($name, " \t\n\r\0\x0B\"'");
-    $area = trim($area, " \t\n\r\0\x0B\"'");
-    $key = $ip . '_ch' . $channel;
-    return [
-        'camera_key' => $key,
-        'ip' => $ip,
-        'channel' => $channel,
-        'name' => $name !== '' ? $name : ('Camera ' . $ip),
-        'area' => $area !== '' ? $area : 'Unknown Area',
-        'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
-        'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
-    ];
-}
-
 $ui_env = load_env_file(__DIR__ . DIRECTORY_SEPARATOR . '.env');
 $stream_base = rtrim($ui_env['BACKEND_URL'] ?? 'http://127.0.0.1:5000', '/');
 
@@ -59,8 +36,21 @@ if ($config_str !== '') {
     foreach ($parts as $part) {
         $items = array_map('trim', explode('|', $part));
         if (count($items) >= 4) {
-            $camera = make_camera_row($items[0], (int)$items[1], $items[2], $items[3], $stream_base);
-            if ($camera) $cameras[] = $camera;
+            $ip = trim($items[0], " \t\n\r\0\x0B\"'");
+            $ch = max(1, (int)$items[1]);
+            $name = trim($items[2], " \t\n\r\0\x0B\"'");
+            $area = trim($items[3], " \t\n\r\0\x0B\"'");
+            if ($ip === '') continue;
+            $key = $ip . '_ch' . $ch;
+            $cameras[] = [
+                'camera_key' => $key,
+                'ip' => $ip,
+                'channel' => $ch,
+                'name' => $name,
+                'area' => $area,
+                'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
+                'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
+            ];
         }
     }
 } else {
@@ -70,38 +60,16 @@ if ($config_str !== '') {
         $n = $index + 1;
         $area = $camera_areas[$index] ?? '';
         if ($area === '') $area = 'Camera ' . $n . ' Area';
-        $camera = make_camera_row($ip, 1, 'Camera ' . $n, $area, $stream_base);
-        if ($camera) $cameras[] = $camera;
-    }
-}
-
-// Merge the non-secret inventory file into the local camera list. The .env entry
-// wins when the same IP+channel exists in both sources.
-if (env_truthy($ui_env, 'CAMERA_INVENTORY_ENABLED', true)) {
-    $inventory_file = trim($ui_env['CAMERA_INVENTORY_FILE'] ?? 'camera_inventory.json');
-    if ($inventory_file === '') $inventory_file = 'camera_inventory.json';
-    if (!preg_match('/^[A-Za-z]:[\\\\\/]/', $inventory_file) && !str_starts_with($inventory_file, '/')) {
-        $inventory_file = __DIR__ . DIRECTORY_SEPARATOR . $inventory_file;
-    }
-    if (is_readable($inventory_file)) {
-        $decoded = json_decode((string)file_get_contents($inventory_file), true);
-        if (is_array($decoded)) {
-            $seen = [];
-            foreach ($cameras as $camera) $seen[$camera['camera_key']] = true;
-            foreach ($decoded as $row) {
-                if (!is_array($row)) continue;
-                $camera = make_camera_row(
-                    (string)($row['camera_ip'] ?? ''),
-                    (int)($row['channel_no'] ?? 1),
-                    (string)($row['camera_name'] ?? ''),
-                    (string)($row['area_name'] ?? ''),
-                    $stream_base
-                );
-                if (!$camera || isset($seen[$camera['camera_key']])) continue;
-                $cameras[] = $camera;
-                $seen[$camera['camera_key']] = true;
-            }
-        }
+        $key = $ip . '_ch1';
+        $cameras[] = [
+            'camera_key' => $key,
+            'ip' => $ip,
+            'channel' => 1,
+            'name' => 'Camera ' . $n,
+            'area' => $area,
+            'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
+            'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
+        ];
     }
 }
 
@@ -114,7 +82,6 @@ function render_page_start(string $active, string $title, string $subtitle = '')
         'reports' => ['reports.php', 'bi-bar-chart-line', 'Vehicle Reports'],
         'violations' => ['violations.php', 'bi-exclamation-triangle', 'Helmet Violations'],
         'road' => ['road_damage.php', 'bi-cone-striped', 'Road Damage'],
-        'incidents' => ['incidents.php', 'bi-car-front-fill', 'Incidents'],
     ];
     ?>
 <!doctype html>
@@ -178,7 +145,7 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app_fixed.js?v=3"></script>
+<script src="assets/app_fixed.js?v=2"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>

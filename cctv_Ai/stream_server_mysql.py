@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 import urllib.parse
 from datetime import datetime
 
@@ -9,15 +10,10 @@ from flask import Response, jsonify, request
 import stream_server as base
 from rider_verified_detector import RiderVerifiedDetector
 from road_report_routes import register_road_report_routes
-from incident_detector import IncidentDetector
-from incident_store import IncidentStore
-from incident_routes import register_incident_routes
 from config import Config
 
 log = logging.getLogger("mjpeg-mysql")
 advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
-incident_store = IncidentStore(base.traffic_store, log)
-incidents = IncidentDetector(Config, incident_store, base.SERVER_SESSION_ID, log)
 
 
 def _json_safe(value):
@@ -143,11 +139,8 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
         inference_ms,
         count_state,
     )
-
-    advanced_summary = {}
-    incident_summary = {}
     try:
-        advanced_summary = advanced.process(
+        summary = advanced.process(
             camera,
             clean_frame,
             result,
@@ -155,28 +148,10 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
             processed_index,
             draw_frame=frame,
         )
+        base.set_ai_status(camera["camera_key"], advanced=summary)
     except Exception as exc:
         log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
-        advanced_summary = {"error": str(exc)}
-
-    try:
-        incident_summary = incidents.process(
-            camera,
-            clean_frame,
-            result,
-            model,
-            processed_index,
-            draw_frame=frame,
-        )
-    except Exception as exc:
-        log.exception("Incident detection failed camera=%s: %s", camera["camera_key"], exc)
-        incident_summary = {"error": str(exc)}
-
-    base.set_ai_status(
-        camera["camera_key"],
-        advanced=advanced_summary,
-        incidents=incident_summary,
-    )
+        base.set_ai_status(camera["camera_key"], advanced={"error": str(exc)})
     return persons, vehicles, class_counts
 
 
@@ -266,7 +241,6 @@ def violation_image(violation_id, image_type):
 
 
 register_road_report_routes(base.app, base.traffic_store, base.allowed_keys, log)
-register_incident_routes(base.app, incident_store, base.traffic_store, base.allowed_keys, log)
 
 
 @base.app.route("/advanced/status")
@@ -277,13 +251,6 @@ def advanced_status():
         "helmet_observation_confidence": getattr(advanced, "helmet_observation_confidence", None),
         "road_tiled_inference": hasattr(advanced, "road_tile_columns"),
         "road_tile_columns": getattr(advanced, "road_tile_columns", None),
-    }
-    status["incident_detection"] = {
-        "enabled": incidents.enabled,
-        "accident_enabled": incidents.accident_enabled,
-        "road_obstruction_fallback": incidents.obstruction_enabled,
-        "accident_confirm_frames": incidents.accident_confirm_frames,
-        "obstruction_confirm_frames": incidents.obstruction_confirm_frames,
     }
     status = _json_safe(status)
     return jsonify({"ok": "runtime_error" not in status, "models": status})
