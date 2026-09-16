@@ -24,7 +24,7 @@ if ($config_str !== '') {
         $items = array_map('trim', explode('|', $part));
         if (count($items) >= 4) {
             $ip = $items[0];
-            $ch = (int)$items[1];
+            $ch = max(1, (int)$items[1]);
             $name = $items[2];
             $area = $items[3];
             $key = $ip . '_ch' . $ch;
@@ -40,7 +40,6 @@ if ($config_str !== '') {
         }
     }
 } else {
-    // Fallback to legacy CAMERA_IPS and CAMERA_AREAS
     $camera_ips = array_values(array_filter(array_map('trim', explode(',', $ui_env['CAMERA_IPS'] ?? '192.168.0.241,192.168.0.242'))));
     $camera_areas = array_map('trim', explode(',', $ui_env['CAMERA_AREAS'] ?? ''));
     foreach ($camera_ips as $index => $ip) {
@@ -63,7 +62,6 @@ if ($config_str !== '') {
 function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 'UTF-8'); }
 
 function render_page_start(string $active, string $title, string $subtitle = ''): void {
-    global $cameras;
     $items = [
         'overview' => ['index.php', 'bi-speedometer2', 'Overview'],
         'live' => ['live.php', 'bi-camera-video', 'Live Monitoring'],
@@ -121,7 +119,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
 }
 
 function render_page_end(array $extraScripts = []): void {
-    global $camera_ips, $camera_areas, $stream_base;
+    global $cameras, $stream_base;
     ?>
     </section>
     <footer>© <?= date('Y') ?> CivicVision AI · Municipal Video Intelligence Platform</footer>
@@ -133,7 +131,7 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app.js?v=4"></script>
+<script src="assets/app_fixed.js?v=1"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
