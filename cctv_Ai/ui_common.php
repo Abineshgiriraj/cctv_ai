@@ -1,6 +1,19 @@
 <?php
 date_default_timezone_set('Asia/Kolkata');
 
+function normalize_env_value(string $value): string {
+    $value = trim($value);
+    $length = strlen($value);
+    if ($length >= 2) {
+        $first = $value[0];
+        $last = $value[$length - 1];
+        if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+            $value = substr($value, 1, -1);
+        }
+    }
+    return trim($value);
+}
+
 function load_env_file(string $path): array {
     $env = [];
     if (!is_readable($path)) return $env;
@@ -8,7 +21,7 @@ function load_env_file(string $path): array {
         $line = trim($line);
         if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
         [$key, $value] = explode('=', $line, 2);
-        $env[trim($key)] = trim($value);
+        $env[trim($key)] = normalize_env_value($value);
     }
     return $env;
 }
@@ -23,10 +36,11 @@ if ($config_str !== '') {
     foreach ($parts as $part) {
         $items = array_map('trim', explode('|', $part));
         if (count($items) >= 4) {
-            $ip = $items[0];
+            $ip = trim($items[0], " \t\n\r\0\x0B\"'");
             $ch = max(1, (int)$items[1]);
-            $name = $items[2];
-            $area = $items[3];
+            $name = trim($items[2], " \t\n\r\0\x0B\"'");
+            $area = trim($items[3], " \t\n\r\0\x0B\"'");
+            if ($ip === '') continue;
             $key = $ip . '_ch' . $ch;
             $cameras[] = [
                 'camera_key' => $key,
@@ -131,11 +145,9 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app_fixed.js?v=1"></script>
+<script src="assets/app_fixed.js?v=2"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
 </body>
 </html>
-    <?php
-}
