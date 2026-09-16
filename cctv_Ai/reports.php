@@ -9,7 +9,7 @@ render_page_start('reports', 'Vehicle Count Reports', 'Day-wise, time-wise and c
         <div class="report-field"><label for="reportToDate">TO DATE</label><input type="date" id="reportToDate" value="<?= e($today) ?>"></div>
         <div class="report-field"><label for="reportFromTime">FROM TIME</label><input type="time" id="reportFromTime" value="00:00"></div>
         <div class="report-field"><label for="reportToTime">TO TIME</label><input type="time" id="reportToTime" value="23:59"></div>
-        <div class="report-field"><label for="reportCamera">CAMERA</label><select id="reportCamera"><option value="">All Cameras</option><?php foreach ($cameras as $camera): ?><option value="<?= e($camera['ip']) ?>"><?= e($camera['name'] . ' · ' . $camera['area']) ?></option><?php endforeach; ?></select></div>
+        <div class="report-field"><label for="reportCamera">CAMERA</label><select id="reportCamera"><option value="">All Cameras</option><?php foreach ($cameras as $camera): ?><option value="<?= e($camera['camera_key']) ?>"><?= e($camera['name'] . ' · ' . $camera['area']) ?></option><?php endforeach; ?></select></div>
         <div class="report-actions"><button type="button" class="secondary" id="btnTodayReport">Today</button><button type="button" class="primary" id="btnRefreshReport"><i class="bi bi-search"></i> Apply</button></div>
     </div>
     <div class="report-kpis">

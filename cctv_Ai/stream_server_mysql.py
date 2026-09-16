@@ -1,5 +1,8 @@
 import logging
+import os
 import threading
+import time
+import urllib.parse
 from datetime import datetime
 
 from flask import Response, jsonify, request
@@ -14,7 +17,6 @@ advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION
 
 
 def _json_safe(value):
-    """Convert detector/model metadata into values Flask can always jsonify."""
     try:
         if hasattr(value, "item"):
             return _json_safe(value.item())
@@ -37,16 +39,97 @@ def _safe_runtime_readiness():
         return {"runtime_error": str(exc)}
 
 
+# ---------------------------------------------------------------------------
+# Multi-recorder compatibility patches
+# ---------------------------------------------------------------------------
+# Recorder credentials stay in local .env. Never hard-code camera passwords in
+# source control. IPs listed in RECORDER_CAMERA_IPS use the recorder credential
+# pair; all other cameras use CAMERA_USERNAME/CAMERA_PASSWORD.
+def _patched_rtsp_url(camera):
+    camera_ip = camera["camera_ip"]
+    user = Config.CAMERA_USERNAME
+    password = Config.CAMERA_PASSWORD
+    recorder_ips = {
+        value.strip()
+        for value in os.getenv("RECORDER_CAMERA_IPS", "").split(",")
+        if value.strip()
+    }
+    if camera_ip in recorder_ips:
+        user = os.getenv("RECORDER_CAMERA_USERNAME", user)
+        password = os.getenv("RECORDER_CAMERA_PASSWORD", password)
+
+    return (
+        f"rtsp://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(password, safe='')}"
+        f"@{camera_ip}:554/cam/realmonitor"
+        f"?channel={int(camera['channel_no'])}&subtype={Config.CAMERA_SUBTYPE}"
+    )
+
+
+def _patched_maybe_count_object(camera, state, *, track_id, cls_id, vehicle_type,
+                                confidence, center, line_y):
+    if (
+        not Config.COUNTING_ENABLED
+        or track_id is None
+        or cls_id not in Config.COUNTED_CLASSES
+    ):
+        return
+
+    state["track_age"][track_id] += 1
+    previous = state["previous_centers"].get(track_id)
+    state["previous_centers"][track_id] = center
+    if previous is None or track_id in state["counted_ids"]:
+        return
+    if state["track_age"][track_id] < Config.COUNT_MIN_TRACK_AGE:
+        return
+    if float(confidence) < Config.COUNT_MIN_CONFIDENCE:
+        return
+
+    previous_y = previous[1]
+    current_y = center[1]
+    if previous_y < line_y <= current_y:
+        direction = "down"
+    elif previous_y > line_y >= current_y:
+        direction = "up"
+    else:
+        return
+
+    state["counted_ids"].add(track_id)
+    state["session_counts"][vehicle_type] += 1
+    state["session_total"] += 1
+
+    stored = False
+    if base.traffic_store is not None:
+        try:
+            stored = base.traffic_store.record_vehicle(
+                session_id=base.SERVER_SESSION_ID,
+                camera=camera,
+                track_id=track_id,
+                vehicle_type=vehicle_type,
+                direction=direction,
+                confidence=confidence,
+            )
+        except Exception as exc:
+            log.exception("Vehicle storage failed camera=%s: %s", camera["camera_key"], exc)
+
+    log.info(
+        "Vehicle counted camera=%s type=%s track=%s direction=%s confidence=%.2f stored=%s",
+        camera["camera_key"], vehicle_type, track_id, direction, confidence, stored,
+    )
+
+
+base.rtsp_url = _patched_rtsp_url
+base._maybe_count_object = _patched_maybe_count_object
 base.advanced_model_readiness = _safe_runtime_readiness
+
 
 _original_annotate = base._annotate_tracking
 
 
-def _annotate_with_advanced(camera_ip, frame, result, model, history, last_seen,
+def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
                             processed_index, inference_ms, count_state):
     clean_frame = frame.copy()
     persons, vehicles, class_counts = _original_annotate(
-        camera_ip,
+        camera,
         frame,
         result,
         model,
@@ -58,17 +141,17 @@ def _annotate_with_advanced(camera_ip, frame, result, model, history, last_seen,
     )
     try:
         summary = advanced.process(
-            camera_ip,
+            camera,
             clean_frame,
             result,
             model,
             processed_index,
             draw_frame=frame,
         )
-        base.set_ai_status(camera_ip, advanced=summary)
+        base.set_ai_status(camera["camera_key"], advanced=summary)
     except Exception as exc:
-        log.exception("Advanced detection failed camera=%s: %s", camera_ip, exc)
-        base.set_ai_status(camera_ip, advanced={"error": str(exc)})
+        log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
+        base.set_ai_status(camera["camera_key"], advanced={"error": str(exc)})
     return persons, vehicles, class_counts
 
 
@@ -85,9 +168,9 @@ def analytics_report():
     to_date = (request.args.get("to_date") or from_date).strip()
     from_time = (request.args.get("from_time") or "00:00").strip()
     to_time = (request.args.get("to_time") or "23:59").strip()
-    camera_ip = (request.args.get("camera_ip") or "").strip() or None
+    camera_key = (request.args.get("camera_key") or request.args.get("camera_ip") or "").strip() or None
 
-    if camera_ip and camera_ip not in base.allowed_ips():
+    if camera_key and camera_key not in base.allowed_keys():
         return jsonify({"ok": False, "error": "Camera not configured"}), 404
 
     try:
@@ -96,7 +179,7 @@ def analytics_report():
             to_date=to_date,
             from_time=from_time,
             to_time=to_time,
-            camera_ip=camera_ip,
+            camera_key=camera_key,
         )
         return jsonify({"ok": True, **data})
     except ValueError as exc:
@@ -157,59 +240,44 @@ def violation_image(violation_id, image_type):
     return Response(image, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
-register_road_report_routes(base.app, base.traffic_store, base.allowed_ips, log)
+register_road_report_routes(base.app, base.traffic_store, base.allowed_keys, log)
 
 
 @base.app.route("/advanced/status")
 def advanced_status():
     status = _safe_runtime_readiness()
     status["accuracy_mode"] = {
-        "head_only_helmet": True,
-        "require_real_rider": True,
-        "require_moving_motorcycle": True,
-        "bike_only_no_helmet_storage": False,
-        "tiled_helmet_detection": bool(getattr(advanced, "helmet_tiled_detection", False)),
-        "helmet_tile_columns": getattr(advanced, "helmet_tile_columns", None),
-        "helmet_tile_rows": getattr(advanced, "helmet_tile_rows", None),
-        "helmet_tile_imgsz": getattr(advanced, "helmet_tile_imgsz", None),
-        "helmet_tile_roi_top_ratio": getattr(advanced, "helmet_tile_roi_top_ratio", None),
-        "helmet_tile_roi_bottom_ratio": getattr(advanced, "helmet_tile_roi_bottom_ratio", None),
+        "multi_camera_keys": True,
         "helmet_observation_confidence": getattr(advanced, "helmet_observation_confidence", None),
-        "strict_no_helmet_min_confidence": getattr(advanced, "strict_no_helmet_confidence", None),
-        "strict_no_helmet_confirm_frames": getattr(advanced, "strict_no_helmet_confirm_frames", None),
-        "strict_no_helmet_vote_ratio": getattr(advanced, "helmet_vote_ratio", None),
         "road_tiled_inference": hasattr(advanced, "road_tile_columns"),
         "road_tile_columns": getattr(advanced, "road_tile_columns", None),
     }
     status = _json_safe(status)
-    return jsonify({
-        "ok": "runtime_error" not in status,
-        "models": status,
-    })
+    return jsonify({"ok": "runtime_error" not in status, "models": status})
 
 
 if __name__ == "__main__":
-    cameras = base.allowed_ips()
+    cameras = Config.CAMERAS
 
-    for ip in cameras:
+    for cam in cameras:
         threading.Thread(
             target=base.capture_stream,
-            args=(ip,),
+            args=(cam,),
             daemon=True,
-            name=f"capture-{ip}",
+            name=f"capture-{cam['camera_key']}",
         ).start()
 
-    for ip in cameras:
+    for cam in cameras:
         threading.Thread(
             target=base.ai_tracking_worker,
-            args=(ip,),
+            args=(cam,),
             daemon=True,
-            name=f"ai-{ip}",
+            name=f"ai-{cam['camera_key']}",
         ).start()
 
     log.info(
         "Starting CCTV backend with MySQL analytics cameras=%s db=%s@%s:%s/%s",
-        cameras,
+        [cam["camera_key"] for cam in cameras],
         Config.DB_USER,
         Config.DB_HOST,
         Config.DB_PORT,

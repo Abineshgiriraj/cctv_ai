@@ -105,12 +105,12 @@ class AdvancedDetector:
         return frame[y1:y2, x1:x2] if x2 > x1 and y2 > y1 else None
 
     @staticmethod
-    def _track_key(camera_ip, obj, divisor=64):
+    def _track_key(camera, obj, divisor=64):
         track_id = obj.get("track_id")
         if track_id is not None:
-            return camera_ip, int(track_id)
+            return camera["camera_key"], int(track_id)
         x1, y1, _, _ = obj["box"]
-        return camera_ip, int(x1 / divisor), int(y1 / divisor)
+        return camera["camera_key"], int(x1 / divisor), int(y1 / divisor)
 
     @staticmethod
     def _primary_objects(result, model):
@@ -246,8 +246,8 @@ class AdvancedDetector:
         found.sort(key=lambda item: item["confidence"] + (0.08 if item["status"] == "helmet" else 0.0), reverse=True)
         return found[0]
 
-    def _helmet_confirmed(self, camera_ip, bike, observation):
-        key = self._track_key(camera_ip, bike)
+    def _helmet_confirmed(self, camera, bike, observation):
+        key = self._track_key(camera, bike)
         votes = self.helmet_votes[key]
         votes.append((observation["status"], observation["confidence"]))
         same = [conf for status, conf in votes if status == observation["status"]]
@@ -360,8 +360,8 @@ class AdvancedDetector:
                     best = (rank, text, score)
         return (best[1], best[2]) if best else (None, None)
 
-    def _plate_consensus(self, camera_ip, bike, detection):
-        key = self._track_key(camera_ip, bike, divisor=80)
+    def _plate_consensus(self, camera, bike, detection):
+        key = self._track_key(camera, bike, divisor=80)
         now = time.time()
         cached = self.plate_cache.get(key)
         if detection is None:
@@ -400,12 +400,12 @@ class AdvancedDetector:
         self.plate_cache[key] = observation
         return observation
 
-    def _store_no_helmet(self, camera_ip, frame, bike, person, confirmation, region, plate):
+    def _store_no_helmet(self, camera, frame, bike, person, confirmation, region, plate):
         if self.store is None:
             return None
         status, confidence, vote_count, vote_window = confirmation
         person_track_id = person.get("track_id") if person else None
-        key = (camera_ip, bike.get("track_id"), person_track_id if person_track_id is not None else -1)
+        key = (camera["camera_key"], bike.get("track_id"), person_track_id if person_track_id is not None else -1)
         now = time.time()
         if now - self.last_violation[key] < self.cfg.VIOLATION_COOLDOWN_SECONDS:
             return None
@@ -422,7 +422,7 @@ class AdvancedDetector:
         plate_confirmed = bool(plate and plate.get("confirmed"))
         return self.store.record_violation(
             session_id=self.session_id,
-            camera_ip=camera_ip,
+            camera=camera,
             violation_type="no_helmet",
             vehicle_type="motorcycle",
             vehicle_track_id=bike.get("track_id"),
@@ -450,7 +450,7 @@ class AdvancedDetector:
         top = max(0, min(h - 1, top))
         return frame[top:h, 0:w], top
 
-    def _run_road_model(self, camera_ip, frame, model_key, event_type, draw_frame=None):
+    def _run_road_model(self, camera, frame, model_key, event_type, draw_frame=None):
         model = self.models.get(model_key)
         if model is None:
             return []
@@ -489,7 +489,7 @@ class AdvancedDetector:
 
                 cx = (full_box[0] + full_box[2]) // 2
                 cy = (full_box[1] + full_box[3]) // 2
-                spatial_key = (camera_ip, event_type, label.lower(), int(cx / 160), int(cy / 120))
+                spatial_key = (camera["camera_key"], event_type, label.lower(), int(cx / 160), int(cy / 120))
                 now = time.time()
                 if now - self.last_road_event[spatial_key] < self.cfg.ROAD_EVENT_COOLDOWN_SECONDS:
                     continue
@@ -497,7 +497,7 @@ class AdvancedDetector:
                 crop = self._crop(frame, full_box, 30)
                 event_id = self.store.record_road_event(
                     session_id=self.session_id,
-                    camera_ip=camera_ip,
+                    camera=camera,
                     event_type=event_type,
                     model_label=label,
                     confidence=confidence,
@@ -508,7 +508,7 @@ class AdvancedDetector:
                                "confidence": confidence, "box": full_box})
         return events
 
-    def process(self, camera_ip, clean_frame, primary_result, primary_model,
+    def process(self, camera, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
         draw_frame = draw_frame if draw_frame is not None else clean_frame
         summary = {
@@ -533,7 +533,7 @@ class AdvancedDetector:
             for bike in bikes:
                 rider = self._best_rider(persons, bike)
                 matched_plate = self._match_plate_to_bike(bike["box"], plate_detections)
-                plate = self._plate_consensus(camera_ip, bike, matched_plate) if matched_plate else None
+                plate = self._plate_consensus(camera, bike, matched_plate) if matched_plate else None
                 if matched_plate:
                     summary["plate_detected"] += 1
                 if plate:
@@ -551,7 +551,7 @@ class AdvancedDetector:
                 if not observation:
                     continue
                 summary["helmet_checked"] += 1
-                confirmation = self._helmet_confirmed(camera_ip, bike, observation)
+                confirmation = self._helmet_confirmed(camera, bike, observation)
                 status, confidence = observation["status"], observation["confidence"]
                 suffix = " ?"
                 if confirmation:
@@ -567,14 +567,14 @@ class AdvancedDetector:
                     summary["helmet_detected"] += 1
                     continue
                 summary["no_helmet_detected"] += 1
-                if self._store_no_helmet(camera_ip, clean_frame, bike, rider,
+                if self._store_no_helmet(camera, clean_frame, bike, rider,
                                          confirmation, observation["search_box"], plate):
                     summary["helmet_violations"] += 1
 
         if run_road_ai:
             summary["road_events"] += len(self._run_road_model(
-                camera_ip, clean_frame, "road_damage", "road_damage", draw_frame=draw_frame))
+                camera, clean_frame, "road_damage", "road_damage", draw_frame=draw_frame))
             summary["road_events"] += len(self._run_road_model(
-                camera_ip, clean_frame, "road_obstruction", "road_obstruction", draw_frame=draw_frame))
+                camera, clean_frame, "road_obstruction", "road_obstruction", draw_frame=draw_frame))
 
         return summary

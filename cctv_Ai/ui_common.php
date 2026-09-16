@@ -1,6 +1,19 @@
 <?php
 date_default_timezone_set('Asia/Kolkata');
 
+function normalize_env_value(string $value): string {
+    $value = trim($value);
+    $length = strlen($value);
+    if ($length >= 2) {
+        $first = $value[0];
+        $last = $value[$length - 1];
+        if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+            $value = substr($value, 1, -1);
+        }
+    }
+    return trim($value);
+}
+
 function load_env_file(string $path): array {
     $env = [];
     if (!is_readable($path)) return $env;
@@ -8,35 +21,61 @@ function load_env_file(string $path): array {
         $line = trim($line);
         if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
         [$key, $value] = explode('=', $line, 2);
-        $env[trim($key)] = trim($value);
+        $env[trim($key)] = normalize_env_value($value);
     }
     return $env;
 }
 
 $ui_env = load_env_file(__DIR__ . DIRECTORY_SEPARATOR . '.env');
-$camera_ips = array_values(array_filter(array_map('trim', explode(',', $ui_env['CAMERA_IPS'] ?? '192.168.0.241,192.168.0.242'))));
-$camera_areas = array_map('trim', explode(',', $ui_env['CAMERA_AREAS'] ?? ''));
 $stream_base = rtrim($ui_env['BACKEND_URL'] ?? 'http://127.0.0.1:5000', '/');
+
 $cameras = [];
-foreach ($camera_ips as $index => $ip) {
-    $n = $index + 1;
-    $area = $camera_areas[$index] ?? '';
-    if ($area === '') $area = 'Camera ' . $n . ' Area';
-    $cameras[] = [
-        'number' => $n,
-        'code' => 'CAM ' . $n,
-        'name' => 'Camera ' . $n,
-        'area' => $area,
-        'ip' => $ip,
-        'raw_url' => $stream_base . '/video_feed/' . rawurlencode($ip),
-        'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($ip),
-    ];
+$config_str = $ui_env['CAMERA_CONFIG'] ?? '';
+if ($config_str !== '') {
+    $parts = array_filter(array_map('trim', explode(',', $config_str)));
+    foreach ($parts as $part) {
+        $items = array_map('trim', explode('|', $part));
+        if (count($items) >= 4) {
+            $ip = trim($items[0], " \t\n\r\0\x0B\"'");
+            $ch = max(1, (int)$items[1]);
+            $name = trim($items[2], " \t\n\r\0\x0B\"'");
+            $area = trim($items[3], " \t\n\r\0\x0B\"'");
+            if ($ip === '') continue;
+            $key = $ip . '_ch' . $ch;
+            $cameras[] = [
+                'camera_key' => $key,
+                'ip' => $ip,
+                'channel' => $ch,
+                'name' => $name,
+                'area' => $area,
+                'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
+                'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
+            ];
+        }
+    }
+} else {
+    $camera_ips = array_values(array_filter(array_map('trim', explode(',', $ui_env['CAMERA_IPS'] ?? '192.168.0.241,192.168.0.242'))));
+    $camera_areas = array_map('trim', explode(',', $ui_env['CAMERA_AREAS'] ?? ''));
+    foreach ($camera_ips as $index => $ip) {
+        $n = $index + 1;
+        $area = $camera_areas[$index] ?? '';
+        if ($area === '') $area = 'Camera ' . $n . ' Area';
+        $key = $ip . '_ch1';
+        $cameras[] = [
+            'camera_key' => $key,
+            'ip' => $ip,
+            'channel' => 1,
+            'name' => 'Camera ' . $n,
+            'area' => $area,
+            'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
+            'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
+        ];
+    }
 }
 
 function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 'UTF-8'); }
 
 function render_page_start(string $active, string $title, string $subtitle = ''): void {
-    global $cameras;
     $items = [
         'overview' => ['index.php', 'bi-speedometer2', 'Overview'],
         'live' => ['live.php', 'bi-camera-video', 'Live Monitoring'],
@@ -94,7 +133,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
 }
 
 function render_page_end(array $extraScripts = []): void {
-    global $camera_ips, $camera_areas, $stream_base;
+    global $cameras, $stream_base;
     ?>
     </section>
     <footer>© <?= date('Y') ?> CivicVision AI · Municipal Video Intelligence Platform</footer>
@@ -103,15 +142,14 @@ function render_page_end(array $extraScripts = []): void {
 window.CCTV_UI_CONFIG = {
     healthUrl: <?= json_encode($stream_base . '/health', JSON_UNESCAPED_SLASHES) ?>,
     baseUrl: <?= json_encode($stream_base, JSON_UNESCAPED_SLASHES) ?>,
-    cameraIps: <?= json_encode(array_values($camera_ips), JSON_UNESCAPED_SLASHES) ?>,
-    cameraAreas: <?= json_encode(array_values($camera_areas), JSON_UNESCAPED_SLASHES) ?>
+    cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app.js?v=4"></script>
+<script src="assets/app_fixed.js?v=2"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
 </body>
 </html>
-    <?php
+<?php
 }

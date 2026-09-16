@@ -57,7 +57,13 @@
     }
 
     document.querySelectorAll('[data-road-id]').forEach((btn) => {
-      btn.addEventListener('click', () => window.open(`${baseUrl}/analytics/road_event_image/${btn.dataset.roadId}`, '_blank'));
+      btn.addEventListener('click', () => {
+        if (window.openLightbox) {
+          window.openLightbox(`${baseUrl}/analytics/road_event_image/${btn.dataset.roadId}`);
+        } else {
+          window.open(`${baseUrl}/analytics/road_event_image/${btn.dataset.roadId}`, '_blank');
+        }
+      });
     });
   }
 

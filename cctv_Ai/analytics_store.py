@@ -1,12 +1,18 @@
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pymysql
 
 
 class TrafficStore:
-    """Persistent MySQL store for traffic counts, violations and road events."""
+    """Persistent MySQL store for traffic counts, violations and road events.
+
+    Existing installations already use a `camera_ip` column. To remain backward
+    compatible while supporting multiple channels on one recorder, new records store
+    the unique camera key (for example `192.168.0.249_ch3`) in that column. The
+    public API exposes the value as `camera_key` as well.
+    """
 
     def __init__(self, _legacy_path=None, host=None, port=None, user=None, password=None, database=None):
         self.host = host or os.getenv("DB_HOST", "127.0.0.1")
@@ -28,13 +34,33 @@ class TrafficStore:
             cursorclass=pymysql.cursors.DictCursor,
         )
 
+    @staticmethod
+    def _camera_key(camera=None, camera_ip=None):
+        if isinstance(camera, dict):
+            return str(camera.get("camera_key") or camera.get("camera_ip") or camera_ip or "")
+        if camera:
+            return str(camera)
+        return str(camera_ip or "")
+
+    @staticmethod
+    def _camera_metadata(camera):
+        if not isinstance(camera, dict):
+            return {}
+        return {
+            "camera_key": camera.get("camera_key"),
+            "camera_ip": camera.get("camera_ip"),
+            "channel_no": camera.get("channel_no"),
+            "camera_name": camera.get("camera_name"),
+            "area_name": camera.get("area_name"),
+        }
+
     def _initialize(self):
         statements = [
             """
             CREATE TABLE IF NOT EXISTS vehicle_events (
                 id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 session_id VARCHAR(32) NOT NULL,
-                camera_ip VARCHAR(45) NOT NULL,
+                camera_ip VARCHAR(128) NOT NULL,
                 track_id BIGINT NOT NULL,
                 vehicle_type VARCHAR(32) NOT NULL,
                 direction VARCHAR(16) NOT NULL,
@@ -50,7 +76,7 @@ class TrafficStore:
             """
             CREATE TABLE IF NOT EXISTS daily_vehicle_counts (
                 event_date DATE NOT NULL,
-                camera_ip VARCHAR(45) NOT NULL,
+                camera_ip VARCHAR(128) NOT NULL,
                 vehicle_type VARCHAR(32) NOT NULL,
                 direction VARCHAR(16) NOT NULL,
                 total_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -62,7 +88,7 @@ class TrafficStore:
             CREATE TABLE IF NOT EXISTS violations (
                 id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 session_id VARCHAR(32) NOT NULL,
-                camera_ip VARCHAR(45) NOT NULL,
+                camera_ip VARCHAR(128) NOT NULL,
                 violation_type VARCHAR(64) NOT NULL,
                 vehicle_type VARCHAR(32) NULL,
                 vehicle_track_id BIGINT NULL,
@@ -86,7 +112,7 @@ class TrafficStore:
             CREATE TABLE IF NOT EXISTS road_events (
                 id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 session_id VARCHAR(32) NOT NULL,
-                camera_ip VARCHAR(45) NOT NULL,
+                camera_ip VARCHAR(128) NOT NULL,
                 event_type VARCHAR(64) NOT NULL,
                 model_label VARCHAR(64) NOT NULL,
                 confidence DECIMAL(6,5) NOT NULL DEFAULT 0,
@@ -104,22 +130,33 @@ class TrafficStore:
             with conn.cursor() as cur:
                 for sql in statements:
                     cur.execute(sql)
+                # Older schemas used VARCHAR(45), which is too short for some
+                # descriptive camera keys. Expanding is safe and preserves data.
+                for table in ("vehicle_events", "daily_vehicle_counts", "violations", "road_events"):
+                    try:
+                        cur.execute(f"ALTER TABLE {table} MODIFY camera_ip VARCHAR(128) NOT NULL")
+                    except Exception:
+                        pass
             conn.commit()
-
 
     def _save_image_to_disk(self, prefix, image_bytes):
         if not image_bytes or not isinstance(image_bytes, bytes):
             return image_bytes
-        if not image_bytes.startswith(b'\xff\xd8\xff'):
+        if not image_bytes.startswith(b"\xff\xd8\xff"):
             return image_bytes
-        import uuid, time, os
+        import time
+        import uuid
         os.makedirs("data/evidence", exist_ok=True)
         filename = f"data/evidence/{prefix}_{uuid.uuid4().hex[:8]}_{int(time.time())}.jpg"
-        with open(filename, "wb") as f:
-            f.write(image_bytes)
+        with open(filename, "wb") as handle:
+            handle.write(image_bytes)
         return filename
 
-    def record_vehicle(self, *, session_id, camera_ip, track_id, vehicle_type, direction, confidence):
+    def record_vehicle(self, *, session_id, track_id, vehicle_type, direction, confidence,
+                       camera=None, camera_ip=None):
+        camera_key = self._camera_key(camera, camera_ip)
+        if not camera_key:
+            raise ValueError("camera key is required")
         now = datetime.now()
         sql_event = """
             INSERT IGNORE INTO vehicle_events
@@ -135,23 +172,31 @@ class TrafficStore:
         with self._connect() as conn:
             try:
                 with conn.cursor() as cur:
-                    cur.execute(sql_event, (session_id, camera_ip, int(track_id), vehicle_type.lower(), direction,
-                                            float(confidence), now, now.date()))
+                    cur.execute(sql_event, (
+                        session_id, camera_key, int(track_id), vehicle_type.lower(), direction,
+                        float(confidence), now, now.date(),
+                    ))
                     inserted = cur.rowcount > 0
                     if inserted:
-                        cur.execute(sql_count, (now.date(), camera_ip, vehicle_type.lower(), direction))
+                        cur.execute(sql_count, (now.date(), camera_key, vehicle_type.lower(), direction))
                 conn.commit()
                 return inserted
             except Exception:
                 conn.rollback()
                 raise
 
-    def record_violation(self, *, session_id, camera_ip, violation_type, vehicle_type=None,
+    def record_violation(self, *, session_id, violation_type, vehicle_type=None,
                          vehicle_track_id=None, person_track_id=None, helmet_status=None,
                          plate_number=None, plate_confidence=None, detection_confidence=0,
-                         evidence_image=None, plate_image=None, metadata=None):
+                         evidence_image=None, plate_image=None, metadata=None,
+                         camera=None, camera_ip=None):
+        camera_key = self._camera_key(camera, camera_ip)
+        if not camera_key:
+            raise ValueError("camera key is required")
         evidence_image = self._save_image_to_disk("violation", evidence_image)
         plate_image = self._save_image_to_disk("plate", plate_image)
+        merged_metadata = dict(metadata or {})
+        merged_metadata.update({k: v for k, v in self._camera_metadata(camera).items() if v is not None})
         now = datetime.now()
         sql = """
             INSERT INTO violations
@@ -162,17 +207,24 @@ class TrafficStore:
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (session_id, camera_ip, violation_type, vehicle_type, vehicle_track_id,
-                                  person_track_id, helmet_status, plate_number, plate_confidence,
-                                  float(detection_confidence or 0), now, now.date(), evidence_image,
-                                  plate_image, json.dumps(metadata or {}, ensure_ascii=False)))
+                cur.execute(sql, (
+                    session_id, camera_key, violation_type, vehicle_type, vehicle_track_id,
+                    person_track_id, helmet_status, plate_number, plate_confidence,
+                    float(detection_confidence or 0), now, now.date(), evidence_image,
+                    plate_image, json.dumps(merged_metadata, ensure_ascii=False),
+                ))
                 row_id = cur.lastrowid
             conn.commit()
             return row_id
 
-    def record_road_event(self, *, session_id, camera_ip, event_type, model_label,
-                          confidence, evidence_image=None, metadata=None):
+    def record_road_event(self, *, session_id, event_type, model_label, confidence,
+                          evidence_image=None, metadata=None, camera=None, camera_ip=None):
+        camera_key = self._camera_key(camera, camera_ip)
+        if not camera_key:
+            raise ValueError("camera key is required")
         evidence_image = self._save_image_to_disk("road", evidence_image)
+        merged_metadata = dict(metadata or {})
+        merged_metadata.update({k: v for k, v in self._camera_metadata(camera).items() if v is not None})
         now = datetime.now()
         sql = """
             INSERT INTO road_events
@@ -182,223 +234,74 @@ class TrafficStore:
         """
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (session_id, camera_ip, event_type, model_label, float(confidence),
-                                  now, now.date(), evidence_image,
-                                  json.dumps(metadata or {}, ensure_ascii=False)))
+                cur.execute(sql, (
+                    session_id, camera_key, event_type, model_label, float(confidence),
+                    now, now.date(), evidence_image,
+                    json.dumps(merged_metadata, ensure_ascii=False),
+                ))
                 row_id = cur.lastrowid
             conn.commit()
             return row_id
 
-    def counts(self, *, event_date=None, camera_ip=None):
-        where = []
-        params = []
-        if event_date and str(event_date).lower() != "all":
-            where.append("event_date = %s")
-            params.append(event_date)
-        elif not event_date:
-            event_date = datetime.now().date().isoformat()
-            where.append("event_date = %s")
-            params.append(event_date)
-
-        if camera_ip:
+    def counts(self, *, event_date=None, camera_key=None, camera_ip=None):
+        camera_key = camera_key or camera_ip
+        event_date = event_date or datetime.now().date().isoformat()
+        where = ["event_date = %s"]
+        params = [event_date]
+        if camera_key:
             where.append("camera_ip = %s")
-            params.append(camera_ip)
-
-        where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+            params.append(camera_key)
         sql = f"""
-            SELECT camera_ip, vehicle_type, direction, SUM(total_count) AS total
+            SELECT camera_ip AS camera_key, vehicle_type, direction, SUM(total_count) AS total
             FROM daily_vehicle_counts
-            {where_clause}
+            WHERE {' AND '.join(where)}
             GROUP BY camera_ip, vehicle_type, direction
             ORDER BY camera_ip, vehicle_type, direction
         """
-        result = {
-            "date": event_date,
-            "camera_ip": camera_ip,
-            "totals": {},
-            "summary": {
-                "persons": 0,
-                "vehicles": 0,
-                "cars": 0,
-                "motorcycles": 0,
-                "buses": 0,
-                "trucks": 0,
-                "bicycles": 0,
-                "other": 0,
-                "grand_total": 0
-            },
-            "by_camera": {},
-            "grand_total": 0
-        }
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-
+        result = {"date": event_date, "camera_key": camera_key, "totals": {}, "by_camera": {}, "grand_total": 0}
         for row in rows:
-            cam = row["camera_ip"]
-            v_type = str(row["vehicle_type"]).lower()
-            direction = row["direction"]
-            total = int(row["total"])
-
-            cam_row = result["by_camera"].setdefault(cam, {
-                "total": 0,
-                "persons": 0,
-                "vehicles": 0,
-                "cars": 0,
-                "motorcycles": 0,
-                "buses": 0,
-                "trucks": 0,
-                "bicycles": 0,
-                "other": 0,
-                "types": {}
-            })
-            type_row = cam_row["types"].setdefault(v_type, {"total": 0, "up": 0, "down": 0, "in": 0})
-            type_row["total"] += total
-            type_row[direction] = type_row.get(direction, 0) + total
-
-            cam_row["total"] += total
-            result["totals"][v_type] = result["totals"].get(v_type, 0) + total
+            key = row["camera_key"]
+            vehicle_type = str(row["vehicle_type"]).lower()
+            total = int(row["total"] or 0)
+            result["totals"][vehicle_type] = result["totals"].get(vehicle_type, 0) + total
             result["grand_total"] += total
-
-            # Categorize into standard report fields
-            if v_type == 'person':
-                result["summary"]["persons"] += total
-                cam_row["persons"] += total
-            else:
-                result["summary"]["vehicles"] += total
-                cam_row["vehicles"] += total
-                if v_type == 'car':
-                    result["summary"]["cars"] += total
-                    cam_row["cars"] += total
-                elif v_type == 'motorcycle':
-                    result["summary"]["motorcycles"] += total
-                    cam_row["motorcycles"] += total
-                elif v_type == 'bus':
-                    result["summary"]["buses"] += total
-                    cam_row["buses"] += total
-                elif v_type == 'truck':
-                    result["summary"]["trucks"] += total
-                    cam_row["trucks"] += total
-                elif v_type == 'bicycle':
-                    result["summary"]["bicycles"] += total
-                    cam_row["bicycles"] += total
-                else:
-                    result["summary"]["other"] += total
-                    cam_row["other"] += total
-
-        result["summary"]["grand_total"] = result["grand_total"]
+            cam = result["by_camera"].setdefault(key, {"camera_key": key, "camera_ip": key, "total": 0, "types": {}})
+            cam["total"] += total
+            cam["types"][vehicle_type] = cam["types"].get(vehicle_type, 0) + total
         return result
 
-    def hourly_counts(self, *, event_date=None, camera_ip=None):
-        where = []
-        params = []
-        if event_date and str(event_date).lower() != "all":
-            where.append("event_date = %s")
-            params.append(event_date)
-        elif not event_date:
-            event_date = datetime.now().date().isoformat()
-            where.append("event_date = %s")
-            params.append(event_date)
-
-        if camera_ip:
+    def hourly_counts(self, *, event_date=None, camera_key=None, camera_ip=None):
+        camera_key = camera_key or camera_ip
+        event_date = event_date or datetime.now().date().isoformat()
+        where = ["event_date = %s"]
+        params = [event_date]
+        if camera_key:
             where.append("camera_ip = %s")
-            params.append(camera_ip)
-
-        where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+            params.append(camera_key)
         sql = f"""
             SELECT HOUR(crossed_at) AS hr, vehicle_type, COUNT(*) AS count
             FROM vehicle_events
-            {where_clause}
+            WHERE {' AND '.join(where)}
             GROUP BY hr, vehicle_type
-            ORDER BY hr ASC
+            ORDER BY hr
         """
-        hourly_data = {h: {} for h in range(24)}
+        hourly = {h: {} for h in range(24)}
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-
         for row in rows:
-            hr = int(row["hr"])
-            v_type = str(row["vehicle_type"]).lower()
-            cnt = int(row["count"])
-            hourly_data[hr][v_type] = cnt
+            hourly[int(row["hr"])][str(row["vehicle_type"]).lower()] = int(row["count"])
+        return {"date": event_date, "camera_key": camera_key, "hourly": hourly}
 
-        return {"date": event_date, "camera_ip": camera_ip, "hourly": hourly_data}
-
-    def report(self, *, from_date=None, to_date=None, from_time="00:00", to_time="23:59", camera_ip=None):
-        today = datetime.now().date().isoformat()
-        from_date = from_date or today
-        to_date = to_date or from_date
-        from_time = from_time or "00:00"
-        to_time = to_time or "23:59"
-
-        if len(from_time) == 5:
-            from_time_sql = from_time + ":00"
-        else:
-            from_time_sql = from_time
-
-        if len(to_time) == 5:
-            to_time_sql = to_time + ":59"
-        else:
-            to_time_sql = to_time
-
-        where = ["event_date BETWEEN %s AND %s", "TIME(crossed_at) BETWEEN %s AND %s"]
-        params = [from_date, to_date, from_time_sql, to_time_sql]
-
-        if camera_ip:
-            where.append("camera_ip = %s")
-            params.append(camera_ip)
-
-        where_sql = "WHERE " + " AND ".join(where)
-
-        sql_summary = f"""
-            SELECT vehicle_type, COUNT(*) AS total
-            FROM vehicle_events
-            {where_sql}
-            GROUP BY vehicle_type
-        """
-
-        sql_camera = f"""
-            SELECT camera_ip, vehicle_type, COUNT(*) AS total
-            FROM vehicle_events
-            {where_sql}
-            GROUP BY camera_ip, vehicle_type
-            ORDER BY camera_ip, vehicle_type
-        """
-
-        sql_daily = f"""
-            SELECT event_date, vehicle_type, COUNT(*) AS total
-            FROM vehicle_events
-            {where_sql}
-            GROUP BY event_date, vehicle_type
-            ORDER BY event_date DESC
-        """
-
-        sql_hourly = f"""
-            SELECT event_date, HOUR(crossed_at) AS hr, vehicle_type, COUNT(*) AS total
-            FROM vehicle_events
-            {where_sql}
-            GROUP BY event_date, hr, vehicle_type
-            ORDER BY event_date DESC, hr ASC
-        """
-
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql_summary, params)
-                summary_rows = cur.fetchall()
-
-                cur.execute(sql_camera, params)
-                camera_rows = cur.fetchall()
-
-                cur.execute(sql_daily, params)
-                daily_rows = cur.fetchall()
-
-                cur.execute(sql_hourly, params)
-                hourly_rows = cur.fetchall()
-
-        summary = {
+    @staticmethod
+    def _empty_report_row(**extra):
+        return {
+            **extra,
             "person": 0,
             "car": 0,
             "motorcycle": 0,
@@ -406,143 +309,97 @@ class TrafficStore:
             "truck": 0,
             "bicycle": 0,
             "other": 0,
-            "vehicles": 0,
             "total": 0,
             "grand_total": 0,
         }
 
-        for r in summary_rows:
-            vt = str(r["vehicle_type"]).lower()
-            cnt = int(r["total"])
-            summary["grand_total"] += cnt
-            if vt == "person":
-                summary["person"] += cnt
+    @classmethod
+    def _add_type(cls, row, vehicle_type, count):
+        vehicle_type = str(vehicle_type).lower()
+        count = int(count or 0)
+        row["grand_total"] += count
+        if vehicle_type == "person":
+            row["person"] += count
+        else:
+            row["total"] += count
+            if vehicle_type in row:
+                row[vehicle_type] += count
             else:
-                summary["vehicles"] += cnt
-                summary["total"] += cnt
-                if vt in summary:
-                    summary[vt] += cnt
-                else:
-                    summary["other"] += cnt
+                row["other"] += count
 
-        cam_dict = {}
-        for r in camera_rows:
-            ip = r["camera_ip"]
-            vt = str(r["vehicle_type"]).lower()
-            cnt = int(r["total"])
-            c_row = cam_dict.setdefault(ip, {
-                "camera_ip": ip,
-                "person": 0,
-                "car": 0,
-                "motorcycle": 0,
-                "bus": 0,
-                "truck": 0,
-                "bicycle": 0,
-                "other": 0,
-                "total": 0,
-                "grand_total": 0,
-            })
-            c_row["grand_total"] += cnt
-            if vt == "person":
-                c_row["person"] += cnt
-            else:
-                c_row["total"] += cnt
-                if vt in c_row:
-                    c_row[vt] += cnt
-                else:
-                    c_row["other"] += cnt
-
-        by_camera = list(cam_dict.values())
-
-        daily_dict = {}
-        for r in daily_rows:
-            d_str = str(r["event_date"])
-            vt = str(r["vehicle_type"]).lower()
-            cnt = int(r["total"])
-            d_row = daily_dict.setdefault(d_str, {
-                "date": d_str,
-                "person": 0,
-                "car": 0,
-                "motorcycle": 0,
-                "bus": 0,
-                "truck": 0,
-                "bicycle": 0,
-                "other": 0,
-                "total": 0,
-                "grand_total": 0,
-            })
-            d_row["grand_total"] += cnt
-            if vt == "person":
-                d_row["person"] += cnt
-            else:
-                d_row["total"] += cnt
-                if vt in d_row:
-                    d_row[vt] += cnt
-                else:
-                    d_row["other"] += cnt
-
-        daily = list(daily_dict.values())
-
-        hourly_dict = {}
-        for r in hourly_rows:
-            d_str = str(r["event_date"])
-            hr = int(r["hr"])
-            hr_str = f"{hr:02d}:00 - {hr:02d}:59"
-            key = (d_str, hr_str)
-            vt = str(r["vehicle_type"]).lower()
-            cnt = int(r["total"])
-
-            h_row = hourly_dict.setdefault(key, {
-                "date": d_str,
-                "hour": hr_str,
-                "person": 0,
-                "car": 0,
-                "motorcycle": 0,
-                "bus": 0,
-                "truck": 0,
-                "bicycle": 0,
-                "other": 0,
-                "total": 0,
-                "grand_total": 0,
-            })
-            h_row["grand_total"] += cnt
-            if vt == "person":
-                h_row["person"] += cnt
-            else:
-                h_row["total"] += cnt
-                if vt in h_row:
-                    h_row[vt] += cnt
-                else:
-                    h_row["other"] += cnt
-
-        hourly = list(hourly_dict.values())
-
+    def report(self, *, from_date=None, to_date=None, from_time="00:00", to_time="23:59",
+               camera_key=None, camera_ip=None):
+        camera_key = camera_key or camera_ip
+        today = datetime.now().date().isoformat()
+        from_date = from_date or today
+        to_date = to_date or from_date
+        from_time_sql = (from_time or "00:00") + (":00" if len(from_time or "00:00") == 5 else "")
+        to_time_sql = (to_time or "23:59") + (":59" if len(to_time or "23:59") == 5 else "")
+        where = ["event_date BETWEEN %s AND %s", "TIME(crossed_at) BETWEEN %s AND %s"]
+        params = [from_date, to_date, from_time_sql, to_time_sql]
+        if camera_key:
+            where.append("camera_ip = %s")
+            params.append(camera_key)
+        where_sql = "WHERE " + " AND ".join(where)
+        queries = {
+            "summary": f"SELECT vehicle_type, COUNT(*) total FROM vehicle_events {where_sql} GROUP BY vehicle_type",
+            "camera": f"SELECT camera_ip AS camera_key, vehicle_type, COUNT(*) total FROM vehicle_events {where_sql} GROUP BY camera_ip, vehicle_type ORDER BY camera_ip, vehicle_type",
+            "daily": f"SELECT event_date, vehicle_type, COUNT(*) total FROM vehicle_events {where_sql} GROUP BY event_date, vehicle_type ORDER BY event_date DESC",
+            "hourly": f"SELECT event_date, HOUR(crossed_at) hr, vehicle_type, COUNT(*) total FROM vehicle_events {where_sql} GROUP BY event_date, hr, vehicle_type ORDER BY event_date DESC, hr",
+        }
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                results = {}
+                for name, sql in queries.items():
+                    cur.execute(sql, params)
+                    results[name] = cur.fetchall()
+        summary = self._empty_report_row()
+        for row in results["summary"]:
+            self._add_type(summary, row["vehicle_type"], row["total"])
+        by_camera_map = {}
+        for row in results["camera"]:
+            key = row["camera_key"]
+            target = by_camera_map.setdefault(key, self._empty_report_row(camera_key=key, camera_ip=key))
+            self._add_type(target, row["vehicle_type"], row["total"])
+        daily_map = {}
+        for row in results["daily"]:
+            day = str(row["event_date"])
+            target = daily_map.setdefault(day, self._empty_report_row(date=day))
+            self._add_type(target, row["vehicle_type"], row["total"])
+        hourly_map = {}
+        for row in results["hourly"]:
+            day = str(row["event_date"])
+            hour = int(row["hr"])
+            label = f"{hour:02d}:00 - {hour:02d}:59"
+            target = hourly_map.setdefault((day, hour), self._empty_report_row(date=day, hour=label))
+            self._add_type(target, row["vehicle_type"], row["total"])
         return {
             "from_date": from_date,
             "to_date": to_date,
             "from_time": from_time,
             "to_time": to_time,
-            "camera_ip": camera_ip,
+            "camera_key": camera_key,
             "summary": summary,
-            "by_camera": by_camera,
-            "daily": daily,
-            "hourly": hourly,
+            "by_camera": list(by_camera_map.values()),
+            "daily": list(daily_map.values()),
+            "hourly": list(hourly_map.values()),
         }
 
     def no_helmet_count(self, event_date=None):
         event_date = event_date or datetime.now().date().isoformat()
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS total FROM violations WHERE event_date=%s AND violation_type='no_helmet'", (event_date,))
+                cur.execute("SELECT COUNT(*) total FROM violations WHERE event_date=%s AND violation_type='no_helmet'", (event_date,))
                 row = cur.fetchone()
-        return int(row["total"]) if row else 0
+        return int((row or {}).get("total") or 0)
 
     def recent(self, limit=25):
         limit = max(1, min(int(limit), 200))
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, camera_ip, track_id, vehicle_type, direction, confidence, crossed_at
+                    SELECT id, camera_ip AS camera_key, camera_ip, track_id, vehicle_type,
+                           direction, confidence, crossed_at
                     FROM vehicle_events ORDER BY id DESC LIMIT %s
                 """, (limit,))
                 rows = cur.fetchall()
@@ -556,8 +413,9 @@ class TrafficStore:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, camera_ip, violation_type, vehicle_type, vehicle_track_id, person_track_id,
-                           helmet_status, plate_number, plate_confidence, detection_confidence, captured_at
+                    SELECT id, camera_ip AS camera_key, camera_ip, violation_type, vehicle_type,
+                           vehicle_track_id, person_track_id, helmet_status, plate_number,
+                           plate_confidence, detection_confidence, captured_at, metadata_json
                     FROM violations ORDER BY id DESC LIMIT %s
                 """, (limit,))
                 rows = cur.fetchall()
@@ -574,12 +432,15 @@ class TrafficStore:
                 row = cur.fetchone()
         if not row or not row.get("image"):
             return None
-        img = row.get("image")
-        if isinstance(img, bytes) and img.startswith(b'\xff\xd8\xff'):
-            return img
-        if isinstance(img, bytes):
-            img = img.decode('utf-8')
-        if isinstance(img, str) and os.path.isfile(img):
-            with open(img, "rb") as f:
-                return f.read()
+        image = row["image"]
+        if isinstance(image, bytes) and image.startswith(b"\xff\xd8\xff"):
+            return image
+        if isinstance(image, bytes):
+            try:
+                image = image.decode("utf-8")
+            except Exception:
+                return None
+        if isinstance(image, str) and os.path.isfile(image):
+            with open(image, "rb") as handle:
+                return handle.read()
         return None

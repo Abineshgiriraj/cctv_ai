@@ -12,3 +12,5 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/*.sqlite3-*
+
+data/evidence/

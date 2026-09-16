@@ -3,7 +3,7 @@
   const qa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const config = window.CCTV_UI_CONFIG || {};
   const baseUrl = config.baseUrl || (config.healthUrl || 'http://127.0.0.1:5000/health').replace('/health', '');
-  const cameraIps = Array.isArray(config.cameraIps) ? config.cameraIps : [];
+  const cameras = Array.isArray(config.cameras) ? config.cameras : [];
 
   function setText(id, value) {
     const el = q(`#${id}`);
@@ -32,6 +32,14 @@
     });
   });
 
+  let zoomScale = 1;
+  let panX = 0;
+  let panY = 0;
+  let isPanning = false;
+  let startX = 0;
+  let startY = 0;
+  let activeCameraImg = null;
+
   function ensureCameraModal() {
     if (q('#cameraFocusModal')) return;
     const modal = document.createElement('div');
@@ -44,26 +52,87 @@
           <span id="focusCameraIp"></span>
           <button type="button" id="focusClose" aria-label="Close"><i class="bi bi-x-lg"></i></button>
         </div>
-        <div class="camera-focus-body"><img id="focusCameraStream" alt="Focused CCTV stream"></div>
-        <div class="camera-focus-foot"><i class="live-dot"></i><b id="focusCameraMode">AI TRACKING LIVE</b><span>Press Esc to close</span></div>
+        <div class="camera-focus-body" style="overflow: hidden; cursor: grab;">
+            <img id="focusCameraStream" alt="Focused CCTV stream" style="transition: transform 0.1s ease-out; transform-origin: center center;">
+        </div>
+        <div class="camera-focus-foot"><i class="live-dot"></i><b id="focusCameraMode">AI TRACKING LIVE</b><span>Scroll to zoom, drag to pan. Press Esc to close</span></div>
       </div>`;
     document.body.appendChild(modal);
     q('#focusClose')?.addEventListener('click', closeCameraModal);
     modal.addEventListener('click', (event) => { if (event.target === modal) closeCameraModal(); });
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeCameraModal(); });
+    
+    // Zoom and Pan Logic
+    const body = modal.querySelector('.camera-focus-body');
+    const img = modal.querySelector('#focusCameraStream');
+    
+    body.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const zoomIntensity = 0.1;
+        if (e.deltaY < 0) zoomScale += zoomIntensity;
+        else zoomScale -= zoomIntensity;
+        zoomScale = Math.min(Math.max(1, zoomScale), 10);
+        
+        if (zoomScale === 1) {
+            panX = 0;
+            panY = 0;
+        }
+        img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomScale})`;
+    });
+
+    body.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        isPanning = true;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        body.style.cursor = 'grabbing';
+    });
+
+    body.addEventListener('mousemove', (e) => {
+        if (!isPanning || zoomScale === 1) return;
+        panX = e.clientX - startX;
+        panY = e.clientY - startY;
+        img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomScale})`;
+    });
+
+    body.addEventListener('mouseup', () => {
+        isPanning = false;
+        body.style.cursor = 'grab';
+    });
+    body.addEventListener('mouseleave', () => {
+        isPanning = false;
+        body.style.cursor = 'grab';
+    });
   }
 
   function openCameraModal(number) {
     const img = q(`#cameraStream${number}`);
     const card = img?.closest('.operator-camera-card');
     if (!img || !card) return;
+    
+    // Reset zoom and pan
+    zoomScale = 1;
+    panX = 0;
+    panY = 0;
+    const focus = q('#focusCameraStream');
+    if (focus) {
+        focus.style.transform = `translate(0px, 0px) scale(1)`;
+    }
+
+    activeCameraImg = img;
     const mode = img.dataset.streamMode || 'ai';
     const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
     setText('focusCameraTitle', `Camera ${number}`);
     setText('focusCameraIp', card.dataset.cameraIp || '');
     setText('focusCameraMode', mode === 'ai' ? 'AI TRACKING LIVE' : 'RAW LIVE');
-    const focus = q('#focusCameraStream');
-    if (focus) focus.src = `${url}?focus=${Date.now()}`;
+    
+    if (focus) {
+        // Prevent connection limits by clearing background stream
+        img.dataset.pausedSrc = img.src;
+        img.removeAttribute('src');
+        focus.src = url;
+    }
+    
     q('#cameraFocusModal')?.classList.add('open');
     document.body.classList.add('modal-open');
   }
@@ -71,7 +140,15 @@
   function closeCameraModal() {
     q('#cameraFocusModal')?.classList.remove('open');
     document.body.classList.remove('modal-open');
-    q('#focusCameraStream')?.removeAttribute('src');
+    
+    const focus = q('#focusCameraStream');
+    if (focus) focus.removeAttribute('src');
+    
+    // Restore background stream
+    if (activeCameraImg && activeCameraImg.dataset.pausedSrc) {
+        activeCameraImg.src = activeCameraImg.dataset.pausedSrc;
+        activeCameraImg = null;
+    }
   }
 
   ensureCameraModal();
@@ -115,7 +192,7 @@
   }
 
   function setSystemState(liveCount, aiLiveCount, aiErrors, reachable) {
-    const total = cameraIps.length;
+    const total = cameras.length;
     const system = q('#systemLive');
     const label = q('span', system);
     system?.classList.remove('offline', 'pending');
@@ -150,9 +227,11 @@
       let aiLiveCount = 0;
       let aiErrors = 0;
 
-      cameraIps.forEach((ip, index) => {
+      cameras.forEach((cam, index) => {
         const number = index + 1;
-        const st = data?.cameras?.[ip] || {};
+        const key = cam.camera_key;
+        const number = index + 1;
+        const st = data?.cameras?.[key] || {};
         const ai = st?.ai || {};
         const rawLive = Boolean(st.connected && st.has_frame);
         const aiLive = Boolean(ai.model_loaded && ai.has_frame && !ai.last_error);
@@ -179,7 +258,7 @@
       updateAdvancedModels(data?.advanced_models || {});
       setSystemState(liveCount, aiLiveCount, aiErrors, true);
     } catch (error) {
-      cameraIps.forEach((_, index) => setCameraState(index + 1, false, 'BACKEND OFFLINE'));
+      cameras.forEach((_, index) => setCameraState(index + 1, false, 'BACKEND OFFLINE'));
       setSystemState(0, 0, 0, false);
     }
   }
@@ -215,8 +294,10 @@
       setText('todayNoHelmetCount', fmt(data.no_helmet));
 
       const cameraMap = new Map((data.by_camera || []).map((row) => [row.camera_ip, row]));
-      cameraIps.forEach((ip, index) => {
-        setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(ip)?.total));
+      cameras.forEach((cam, index) => {
+        const number = index + 1;
+        const key = cam.camera_key;
+        setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(cam.camera_key)?.total));
       });
     } catch (_) {
       setText('todayVehicleCount', '—');
@@ -262,7 +343,7 @@
 
     const cameraBody = q('#tblCameraReport tbody');
     if (cameraBody) {
-      const cameraNames = new Map(cameraIps.map((ip, index) => [ip, `Camera ${index + 1}`]));
+      const cameraNames = new Map(cameras.map((cam) => [cam.camera_key, cam.name]));
       cameraBody.innerHTML = (data.by_camera || []).length
         ? data.by_camera.map((row) => `<tr><td><b>${esc(cameraNames.get(row.camera_ip) || 'Camera')}</b></td><td><code>${esc(row.camera_ip)}</code></td>${vehicleCells(row)}</tr>`).join('')
         : '<tr><td colspan="8" class="empty-row">No camera counts in this period</td></tr>';
@@ -358,11 +439,11 @@
         const rows = data.by_camera || [];
         cameraTbody.innerHTML = rows.length
           ? rows.map((r) => {
-              const camIndex = config.cameraIps.indexOf(r.camera_ip);
-              const camName = camIndex >= 0 ? `Camera ${camIndex + 1}` : 'Camera';
+              const camObj = cameras.find(c => c.camera_key === (r.camera_key || r.camera_ip));
+              const camName = camObj ? camObj.name : 'Camera';
               return `<tr>
                 <td><b>${esc(camName)}</b></td>
-                <td><code>${esc(r.camera_ip)}</code></td>
+                <td><code>${esc(r.camera_key || r.camera_ip)}</code></td>
                 <td>${fmt(r.person)}</td>
                 <td>${fmt(r.car)}</td>
                 <td>${fmt(r.motorcycle)}</td>
