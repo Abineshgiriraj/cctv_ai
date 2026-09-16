@@ -1,10 +1,21 @@
 from ultralytics import YOLO
 
-model = YOLO("yolov8n.pt")
+model = YOLO("models/helmet.pt")
 
-print("YOLO model loaded successfully")
-print()
-print("Available classes:")
+results = model.predict(
+    "test_rider.jpg",
+    conf=0.20,
+    imgsz=960,
+    save=True,
+    verbose=True
+)
 
-for class_id, name in model.names.items():
-    print(class_id, name)
+for result in results:
+    if result.boxes is None or len(result.boxes) == 0:
+        print("NO HELMET DETECTION FOUND")
+        continue
+
+    for box in result.boxes:
+        cls_id = int(box.cls[0])
+        conf = float(box.conf[0])
+        print(model.names[cls_id], round(conf * 100, 2), "%")

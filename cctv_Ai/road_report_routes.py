@@ -38,28 +38,28 @@ def register_road_report_routes(app, store, allowed_ips, log):
         today = datetime.now().date().isoformat()
         from_date = (request.args.get('from_date') or today).strip()
         to_date = (request.args.get('to_date') or from_date).strip()
-        camera_ip = (request.args.get('camera_ip') or '').strip() or None
+        camera_key = (request.args.get('camera_key') or request.args.get('camera_ip') or '').strip() or None
         label = (request.args.get('label') or '').strip() or None
         try:
             limit = max(1, min(int(request.args.get('limit', 250)), 1000))
         except ValueError:
             limit = 250
 
-        if camera_ip and camera_ip not in allowed_ips():
+        if camera_key and camera_key not in allowed_ips():
             return jsonify({'ok': False, 'error': 'Camera not configured'}), 404
 
         where = ['event_date BETWEEN %s AND %s', "event_type='road_damage'"]
         params = [from_date, to_date]
-        if camera_ip:
-            where.append('camera_ip=%s')
-            params.append(camera_ip)
+        if camera_key:
+            where.append('camera_key=%s')
+            params.append(camera_key)
         if label:
             where.append('model_label=%s')
             params.append(label)
         params.append(limit)
 
         sql = f"""
-            SELECT id, camera_ip, event_type, model_label, confidence, captured_at,
+            SELECT id, camera_key, event_type, model_label, confidence, captured_at,
                    event_date, metadata_json
             FROM road_events
             WHERE {' AND '.join(where)}
@@ -87,11 +87,11 @@ def register_road_report_routes(app, store, allowed_ips, log):
                 medium += 1
             else:
                 low += 1
-            cameras.add(row.get('camera_ip'))
+            cameras.add(row.get('camera_key'))
             captured = row.get('captured_at')
             events.append({
                 'id': int(row['id']),
-                'camera_ip': row.get('camera_ip'),
+                'camera_ip': row.get('camera_key'),
                 'event_type': row.get('event_type'),
                 'model_label': row.get('model_label'),
                 'damage_level': level,
@@ -104,7 +104,7 @@ def register_road_report_routes(app, store, allowed_ips, log):
             'ok': True,
             'from_date': from_date,
             'to_date': to_date,
-            'camera_ip': camera_ip,
+            'camera_key': camera_key,
             'label': label,
             'summary': {
                 'total': len(events),

@@ -189,7 +189,7 @@ class TrafficStore:
             conn.commit()
             return row_id
 
-    def counts(self, *, event_date=None, camera_ip=None):
+    def counts(self, *, event_date=None, camera_key=None):
         where = []
         params = []
         if event_date and str(event_date).lower() != "all":
@@ -200,21 +200,21 @@ class TrafficStore:
             where.append("event_date = %s")
             params.append(event_date)
 
-        if camera_ip:
-            where.append("camera_ip = %s")
-            params.append(camera_ip)
+        if camera_key:
+            where.append("camera_key = %s")
+            params.append(camera_key)
 
         where_clause = f"WHERE {' AND '.join(where)}" if where else ""
         sql = f"""
-            SELECT camera_ip, vehicle_type, direction, SUM(total_count) AS total
+            SELECT camera_key, vehicle_type, direction, SUM(total_count) AS total
             FROM daily_vehicle_counts
             {where_clause}
-            GROUP BY camera_ip, vehicle_type, direction
-            ORDER BY camera_ip, vehicle_type, direction
+            GROUP BY camera_key, vehicle_type, direction
+            ORDER BY camera_key, vehicle_type, direction
         """
         result = {
             "date": event_date,
-            "camera_ip": camera_ip,
+            "camera_key": camera_key,
             "totals": {},
             "summary": {
                 "persons": 0,
@@ -236,7 +236,7 @@ class TrafficStore:
                 rows = cur.fetchall()
 
         for row in rows:
-            cam = row["camera_ip"]
+            cam = row["camera_key"]
             v_type = str(row["vehicle_type"]).lower()
             direction = row["direction"]
             total = int(row["total"])
@@ -290,7 +290,7 @@ class TrafficStore:
         result["summary"]["grand_total"] = result["grand_total"]
         return result
 
-    def hourly_counts(self, *, event_date=None, camera_ip=None):
+    def hourly_counts(self, *, event_date=None, camera_key=None):
         where = []
         params = []
         if event_date and str(event_date).lower() != "all":
@@ -301,9 +301,9 @@ class TrafficStore:
             where.append("event_date = %s")
             params.append(event_date)
 
-        if camera_ip:
-            where.append("camera_ip = %s")
-            params.append(camera_ip)
+        if camera_key:
+            where.append("camera_key = %s")
+            params.append(camera_key)
 
         where_clause = f"WHERE {' AND '.join(where)}" if where else ""
         sql = f"""
@@ -325,9 +325,9 @@ class TrafficStore:
             cnt = int(row["count"])
             hourly_data[hr][v_type] = cnt
 
-        return {"date": event_date, "camera_ip": camera_ip, "hourly": hourly_data}
+        return {"date": event_date, "camera_key": camera_key, "hourly": hourly_data}
 
-    def report(self, *, from_date=None, to_date=None, from_time="00:00", to_time="23:59", camera_ip=None):
+    def report(self, *, from_date=None, to_date=None, from_time="00:00", to_time="23:59", camera_key=None):
         today = datetime.now().date().isoformat()
         from_date = from_date or today
         to_date = to_date or from_date
@@ -347,9 +347,9 @@ class TrafficStore:
         where = ["event_date BETWEEN %s AND %s", "TIME(crossed_at) BETWEEN %s AND %s"]
         params = [from_date, to_date, from_time_sql, to_time_sql]
 
-        if camera_ip:
-            where.append("camera_ip = %s")
-            params.append(camera_ip)
+        if camera_key:
+            where.append("camera_key = %s")
+            params.append(camera_key)
 
         where_sql = "WHERE " + " AND ".join(where)
 
@@ -361,11 +361,11 @@ class TrafficStore:
         """
 
         sql_camera = f"""
-            SELECT camera_ip, vehicle_type, COUNT(*) AS total
+            SELECT camera_key, vehicle_type, COUNT(*) AS total
             FROM vehicle_events
             {where_sql}
-            GROUP BY camera_ip, vehicle_type
-            ORDER BY camera_ip, vehicle_type
+            GROUP BY camera_key, vehicle_type
+            ORDER BY camera_key, vehicle_type
         """
 
         sql_daily = f"""
@@ -427,7 +427,7 @@ class TrafficStore:
 
         cam_dict = {}
         for r in camera_rows:
-            ip = r["camera_ip"]
+            ip = r["camera_key"]
             vt = str(r["vehicle_type"]).lower()
             cnt = int(r["total"])
             c_row = cam_dict.setdefault(ip, {
@@ -522,7 +522,7 @@ class TrafficStore:
             "to_date": to_date,
             "from_time": from_time,
             "to_time": to_time,
-            "camera_ip": camera_ip,
+            "camera_key": camera_key,
             "summary": summary,
             "by_camera": by_camera,
             "daily": daily,
@@ -542,7 +542,7 @@ class TrafficStore:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, camera_ip, track_id, vehicle_type, direction, confidence, crossed_at
+                    SELECT id, camera_key, track_id, vehicle_type, direction, confidence, crossed_at
                     FROM vehicle_events ORDER BY id DESC LIMIT %s
                 """, (limit,))
                 rows = cur.fetchall()
@@ -556,7 +556,7 @@ class TrafficStore:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, camera_ip, violation_type, vehicle_type, vehicle_track_id, person_track_id,
+                    SELECT id, camera_key, violation_type, vehicle_type, vehicle_track_id, person_track_id,
                            helmet_status, plate_number, plate_confidence, detection_confidence, captured_at
                     FROM violations ORDER BY id DESC LIMIT %s
                 """, (limit,))

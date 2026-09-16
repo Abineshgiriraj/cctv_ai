@@ -26,11 +26,46 @@ def _bool(name: str, default: bool = False):
 
 
 class Config:
-    CAMERA_IPS = [ip.strip() for ip in os.getenv("CAMERA_IPS", "192.168.0.241").split(",") if ip.strip()]
+    def _parse_camera_config():
+        config_str = os.getenv("CAMERA_CONFIG", "")
+        cameras = []
+        if config_str:
+            parts = [p.strip() for p in config_str.split(",") if p.strip()]
+            for part in parts:
+                items = [x.strip() for x in part.split("|")]
+                if len(items) >= 4:
+                    ip, ch_str, name, area = items[0], items[1], items[2], items[3]
+                    try:
+                        ch = int(ch_str)
+                    except ValueError:
+                        ch = 1
+                    cameras.append({
+                        "camera_key": f"{ip}_ch{ch}",
+                        "camera_ip": ip,
+                        "channel_no": ch,
+                        "camera_name": name,
+                        "area_name": area
+                    })
+        else:
+            # Fallback to older format if CAMERA_CONFIG is not set
+            ips = [ip.strip() for ip in os.getenv("CAMERA_IPS", "192.168.0.241").split(",") if ip.strip()]
+            for idx, ip in enumerate(ips):
+                cameras.append({
+                    "camera_key": f"{ip}_ch1",
+                    "camera_ip": ip,
+                    "channel_no": 1,
+                    "camera_name": f"Camera {idx+1}",
+                    "area_name": f"Camera {idx+1} Area"
+                })
+        return cameras
+
+    CAMERAS = _parse_camera_config()
+    # Provide CAMERA_IPS list for anything that still expects it
+    CAMERA_IPS = [c["camera_ip"] for c in CAMERAS]
+
     CAMERA_USERNAME = os.getenv("CAMERA_USERNAME", "admin")
     CAMERA_PASSWORD = os.getenv("CAMERA_PASSWORD", "")
-    CAMERA_CHANNEL = int(os.getenv("CAMERA_CHANNEL", 1))
-    CAMERA_SUBTYPE = int(os.getenv("CAMERA_SUBTYPE", 1))
+    CAMERA_SUBTYPE = int(os.getenv("CAMERA_SUBTYPE", 0))
 
     YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
 

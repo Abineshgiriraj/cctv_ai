@@ -14,23 +14,50 @@ function load_env_file(string $path): array {
 }
 
 $ui_env = load_env_file(__DIR__ . DIRECTORY_SEPARATOR . '.env');
-$camera_ips = array_values(array_filter(array_map('trim', explode(',', $ui_env['CAMERA_IPS'] ?? '192.168.0.241,192.168.0.242'))));
-$camera_areas = array_map('trim', explode(',', $ui_env['CAMERA_AREAS'] ?? ''));
 $stream_base = rtrim($ui_env['BACKEND_URL'] ?? 'http://127.0.0.1:5000', '/');
+
 $cameras = [];
-foreach ($camera_ips as $index => $ip) {
-    $n = $index + 1;
-    $area = $camera_areas[$index] ?? '';
-    if ($area === '') $area = 'Camera ' . $n . ' Area';
-    $cameras[] = [
-        'number' => $n,
-        'code' => 'CAM ' . $n,
-        'name' => 'Camera ' . $n,
-        'area' => $area,
-        'ip' => $ip,
-        'raw_url' => $stream_base . '/video_feed/' . rawurlencode($ip),
-        'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($ip),
-    ];
+$config_str = $ui_env['CAMERA_CONFIG'] ?? '';
+if ($config_str !== '') {
+    $parts = array_filter(array_map('trim', explode(',', $config_str)));
+    foreach ($parts as $part) {
+        $items = array_map('trim', explode('|', $part));
+        if (count($items) >= 4) {
+            $ip = $items[0];
+            $ch = (int)$items[1];
+            $name = $items[2];
+            $area = $items[3];
+            $key = $ip . '_ch' . $ch;
+            $cameras[] = [
+                'camera_key' => $key,
+                'ip' => $ip,
+                'channel' => $ch,
+                'name' => $name,
+                'area' => $area,
+                'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
+                'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
+            ];
+        }
+    }
+} else {
+    // Fallback to legacy CAMERA_IPS and CAMERA_AREAS
+    $camera_ips = array_values(array_filter(array_map('trim', explode(',', $ui_env['CAMERA_IPS'] ?? '192.168.0.241,192.168.0.242'))));
+    $camera_areas = array_map('trim', explode(',', $ui_env['CAMERA_AREAS'] ?? ''));
+    foreach ($camera_ips as $index => $ip) {
+        $n = $index + 1;
+        $area = $camera_areas[$index] ?? '';
+        if ($area === '') $area = 'Camera ' . $n . ' Area';
+        $key = $ip . '_ch1';
+        $cameras[] = [
+            'camera_key' => $key,
+            'ip' => $ip,
+            'channel' => 1,
+            'name' => 'Camera ' . $n,
+            'area' => $area,
+            'raw_url' => $stream_base . '/video_feed/' . rawurlencode($key),
+            'ai_url' => $stream_base . '/tracked_feed/' . rawurlencode($key),
+        ];
+    }
 }
 
 function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 'UTF-8'); }
@@ -103,8 +130,7 @@ function render_page_end(array $extraScripts = []): void {
 window.CCTV_UI_CONFIG = {
     healthUrl: <?= json_encode($stream_base . '/health', JSON_UNESCAPED_SLASHES) ?>,
     baseUrl: <?= json_encode($stream_base, JSON_UNESCAPED_SLASHES) ?>,
-    cameraIps: <?= json_encode(array_values($camera_ips), JSON_UNESCAPED_SLASHES) ?>,
-    cameraAreas: <?= json_encode(array_values($camera_areas), JSON_UNESCAPED_SLASHES) ?>
+    cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
 <script src="assets/app.js?v=4"></script>

@@ -17,7 +17,7 @@ class TiledAccuracyDetector(AccuracyDetector):
 
         self.log.info("Tiled helmet mode has been disabled in favor of motorcycle-bound tracking.")
         
-    def process(self, camera_ip, clean_frame, primary_result, primary_model,
+    def process(self, camera, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
-        return super().process(camera_ip, clean_frame, primary_result, primary_model,
+        return super().process(camera, clean_frame, primary_result, primary_model,
                                processed_index, draw_frame=draw_frame)

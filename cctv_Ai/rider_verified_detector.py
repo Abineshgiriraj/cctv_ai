@@ -11,8 +11,8 @@ class RiderVerifiedDetector(AccuracyDetector):
     treated as uncertain and no violation is stored.
     """
 
-    def _moving_bike(self, camera_ip, bike):
-        return self._bike_motion_ok(camera_ip, bike)
+    def _moving_bike(self, camera, bike):
+        return self._bike_motion_ok(camera, bike)
 
     def _verified_rider(self, persons, bike):
         rider = self._best_rider(persons, bike)
@@ -38,7 +38,7 @@ class RiderVerifiedDetector(AccuracyDetector):
             return None
         return rider
 
-    def process(self, camera_ip, clean_frame, primary_result, primary_model,
+    def process(self, camera, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
         draw_frame = draw_frame if draw_frame is not None else clean_frame
         summary = {
@@ -71,12 +71,12 @@ class RiderVerifiedDetector(AccuracyDetector):
             summary["helmet_tile_candidates"] = len(tiled_helmet_detections)
 
             for bike in bikes:
-                key = self._track_key(camera_ip, bike)
+                key = self._track_key(camera, bike)
                 rider = self._verified_rider(persons, bike)
 
                 matched_plate = self._match_plate_to_bike(bike["box"], plate_detections)
                 plate = (
-                    self._plate_consensus(camera_ip, bike, matched_plate)
+                    self._plate_consensus(camera, bike, matched_plate)
                     if matched_plate else None
                 )
                 if matched_plate:
@@ -99,7 +99,7 @@ class RiderVerifiedDetector(AccuracyDetector):
                     continue
 
                 # Critical safety rule: stationary/parked motorcycles are ignored.
-                if not self._moving_bike(camera_ip, bike):
+                if not self._moving_bike(camera, bike):
                     self.helmet_votes[key].clear()
                     summary["helmet_skipped_stationary"] += 1
                     continue
@@ -123,7 +123,7 @@ class RiderVerifiedDetector(AccuracyDetector):
                     continue
 
                 summary["helmet_checked"] += 1
-                confirmation = self._helmet_confirmed(camera_ip, bike, observation)
+                confirmation = self._helmet_confirmed(camera, bike, observation)
                 status = observation["status"]
                 confidence = observation["confidence"]
                 suffix = " ?"

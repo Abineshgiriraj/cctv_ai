@@ -42,11 +42,11 @@ base.advanced_model_readiness = _safe_runtime_readiness
 _original_annotate = base._annotate_tracking
 
 
-def _annotate_with_advanced(camera_ip, frame, result, model, history, last_seen,
+def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
                             processed_index, inference_ms, count_state):
     clean_frame = frame.copy()
     persons, vehicles, class_counts = _original_annotate(
-        camera_ip,
+        camera,
         frame,
         result,
         model,
@@ -58,17 +58,17 @@ def _annotate_with_advanced(camera_ip, frame, result, model, history, last_seen,
     )
     try:
         summary = advanced.process(
-            camera_ip,
+            camera,
             clean_frame,
             result,
             model,
             processed_index,
             draw_frame=frame,
         )
-        base.set_ai_status(camera_ip, advanced=summary)
+        base.set_ai_status(camera["camera_key"], advanced=summary)
     except Exception as exc:
-        log.exception("Advanced detection failed camera=%s: %s", camera_ip, exc)
-        base.set_ai_status(camera_ip, advanced={"error": str(exc)})
+        log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
+        base.set_ai_status(camera["camera_key"], advanced={"error": str(exc)})
     return persons, vehicles, class_counts
 
 
@@ -85,9 +85,9 @@ def analytics_report():
     to_date = (request.args.get("to_date") or from_date).strip()
     from_time = (request.args.get("from_time") or "00:00").strip()
     to_time = (request.args.get("to_time") or "23:59").strip()
-    camera_ip = (request.args.get("camera_ip") or "").strip() or None
+    camera_key = (request.args.get("camera_key") or request.args.get("camera_ip") or "").strip() or None
 
-    if camera_ip and camera_ip not in base.allowed_ips():
+    if camera_key and camera_key not in base.allowed_keys():
         return jsonify({"ok": False, "error": "Camera not configured"}), 404
 
     try:
@@ -96,7 +96,7 @@ def analytics_report():
             to_date=to_date,
             from_time=from_time,
             to_time=to_time,
-            camera_ip=camera_ip,
+            camera_key=camera_key,
         )
         return jsonify({"ok": True, **data})
     except ValueError as exc:
@@ -157,7 +157,7 @@ def violation_image(violation_id, image_type):
     return Response(image, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
-register_road_report_routes(base.app, base.traffic_store, base.allowed_ips, log)
+register_road_report_routes(base.app, base.traffic_store, base.allowed_keys, log)
 
 
 @base.app.route("/advanced/status")
@@ -189,22 +189,22 @@ def advanced_status():
 
 
 if __name__ == "__main__":
-    cameras = base.allowed_ips()
+    cameras = Config.CAMERAS
 
-    for ip in cameras:
+    for cam in cameras:
         threading.Thread(
             target=base.capture_stream,
-            args=(ip,),
+            args=(cam,),
             daemon=True,
-            name=f"capture-{ip}",
+            name=f"capture-{cam['camera_key']}",
         ).start()
 
-    for ip in cameras:
+    for cam in cameras:
         threading.Thread(
             target=base.ai_tracking_worker,
-            args=(ip,),
+            args=(cam,),
             daemon=True,
-            name=f"ai-{ip}",
+            name=f"ai-{cam['camera_key']}",
         ).start()
 
     log.info(

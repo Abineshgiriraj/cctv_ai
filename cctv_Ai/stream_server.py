@@ -20,7 +20,7 @@ log = logging.getLogger("mjpeg")
 app = Flask(__name__)
 
 # Existing raw MJPEG state. Kept separate from AI output so the original
-# /video_feed/<camera_ip> path remains available as a fallback.
+# /video_feed/<camera_key> path remains available as a fallback.
 output_frames = {}
 latest_cv_frames = {}
 frame_sequence = {}
@@ -51,11 +51,12 @@ except Exception as exc:
     log.exception("Traffic analytics persistence disabled: %s", exc)
 
 
-def allowed_ips():
-    return [ip.strip() for ip in Config.CAMERA_IPS if ip.strip()]
+def allowed_keys():
+    return [c["camera_key"] for c in Config.CAMERAS]
 
 
-def rtsp_url(camera_ip: str) -> str:
+def rtsp_url(camera: dict) -> str:
+    camera_ip = camera["camera_ip"]
     user = Config.CAMERA_USERNAME
     password = Config.CAMERA_PASSWORD
     
@@ -69,7 +70,7 @@ def rtsp_url(camera_ip: str) -> str:
     
     return (
         f"rtsp://{user_quoted}:{password_quoted}@{camera_ip}:554/cam/realmonitor"
-        f"?channel={Config.CAMERA_CHANNEL}&subtype={Config.CAMERA_SUBTYPE}"
+        f"?channel={camera["channel_no"]}&subtype={Config.CAMERA_SUBTYPE}"
     )
 
 
@@ -88,10 +89,10 @@ def advanced_model_readiness():
     }
 
 
-def set_status(camera_ip: str, **fields):
+def set_status(camera_key: str, **fields):
     with lock:
         row = camera_status.setdefault(
-            camera_ip,
+            camera_key,
             {
                 "connected": False,
                 "frames": 0,
@@ -123,22 +124,24 @@ def default_ai_row():
     }
 
 
-def set_ai_status(camera_ip: str, **fields):
+def set_ai_status(camera_key: str, **fields):
     with lock:
-        row = ai_status.setdefault(camera_ip, default_ai_row())
+        row = ai_status.setdefault(camera_key, default_ai_row())
         row.update(fields)
 
 
-def capture_stream(camera_ip: str):
+def capture_stream(camera: dict):
+    camera_key = camera["camera_key"]
+    camera_ip = camera["camera_ip"]
     """Open the camera exactly once and publish both JPEG and raw OpenCV frames."""
-    url = rtsp_url(camera_ip)
+    url = rtsp_url(camera)
     reconnect_delay = 3
 
     while True:
         log.info(
             "Connecting RTSP camera=%s channel=%s subtype=%s transport=tcp",
-            camera_ip,
-            Config.CAMERA_CHANNEL,
+            camera_key,
+            camera["channel_no"],
             Config.CAMERA_SUBTYPE,
         )
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
@@ -150,19 +153,19 @@ def capture_stream(camera_ip: str):
         if not cap.isOpened():
             msg = (
                 f"OpenCV could not open RTSP for {camera_ip}:554 "
-                f"(channel={Config.CAMERA_CHANNEL}, subtype={Config.CAMERA_SUBTYPE}). "
+                f"(channel={camera['channel_no']}, subtype={Config.CAMERA_SUBTYPE}). "
                 "Check network, credentials, and that the camera RTSP service is up."
             )
             log.error(msg)
-            set_status(camera_ip, connected=False, last_error=msg, last_error_at=time.time())
+            set_status(camera_key, connected=False, last_error=msg, last_error_at=time.time())
             time.sleep(reconnect_delay)
             continue
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        log.info("RTSP open camera=%s size=%sx%s fps=%s", camera_ip, width, height, fps)
-        set_status(camera_ip, connected=True, last_error=None)
+        log.info("RTSP open camera=%s size=%sx%s fps=%s", camera_key, width, height, fps)
+        set_status(camera_key, connected=True, last_error=None)
 
         fail_reads = 0
         while True:
@@ -171,7 +174,7 @@ def capture_stream(camera_ip: str):
                 fail_reads += 1
                 msg = f"RTSP read failed for {camera_ip} (consecutive={fail_reads})"
                 log.warning(msg)
-                set_status(camera_ip, connected=False, last_error=msg, last_error_at=time.time())
+                set_status(camera_key, connected=False, last_error=msg, last_error_at=time.time())
                 if fail_reads >= 3:
                     break
                 time.sleep(0.2)
@@ -186,26 +189,26 @@ def capture_stream(camera_ip: str):
             if not ok:
                 msg = f"JPEG encode failed for {camera_ip}"
                 log.error(msg)
-                set_status(camera_ip, last_error=msg, last_error_at=time.time())
+                set_status(camera_key, last_error=msg, last_error_at=time.time())
                 continue
 
             jpeg = encoded.tobytes()
             if len(jpeg) < 100 or jpeg[:2] != b"\xff\xd8":
-                msg = f"Invalid JPEG from {camera_ip} bytes={len(jpeg)}"
+                msg = f"Invalid JPEG from {camera_key} bytes={len(jpeg)}"
                 log.error(msg)
-                set_status(camera_ip, last_error=msg, last_error_at=time.time())
+                set_status(camera_key, last_error=msg, last_error_at=time.time())
                 continue
 
             with lock:
                 # Preserve the original raw stream output.
-                output_frames[camera_ip] = jpeg
+                output_frames[camera_key] = jpeg
 
                 # Share the same captured frame with the AI worker. No second RTSP
                 # connection is opened for detection/tracking.
-                latest_cv_frames[camera_ip] = frame
-                frame_sequence[camera_ip] = int(frame_sequence.get(camera_ip) or 0) + 1
+                latest_cv_frames[camera_key] = frame
+                frame_sequence[camera_key] = int(frame_sequence.get(camera_key) or 0) + 1
 
-                row = camera_status.setdefault(camera_ip, {})
+                row = camera_status.setdefault(camera_key, {})
                 row["connected"] = True
                 row["frames"] = int(row.get("frames") or 0) + 1
                 row["last_jpeg_bytes"] = len(jpeg)
@@ -213,7 +216,7 @@ def capture_stream(camera_ip: str):
                 row["last_error"] = None
 
         cap.release()
-        log.error("Reconnecting camera=%s in %ss", camera_ip, reconnect_delay)
+        log.error("Reconnecting camera=%s in %ss", camera_key, reconnect_delay)
         time.sleep(reconnect_delay)
 
 
@@ -295,7 +298,7 @@ def _new_traffic_state():
     }
 
 
-def _maybe_count_object(camera_ip, state, *, track_id, cls_id, vehicle_type,
+def _maybe_count_object(camera: dict, state, *, track_id, cls_id, vehicle_type,
                          confidence, center, line_y):
     if not Config.COUNTING_ENABLED or track_id is None or cls_id not in Config.COUNTED_CLASSES:
         return
@@ -326,7 +329,7 @@ def _maybe_count_object(camera_ip, state, *, track_id, cls_id, vehicle_type,
     if traffic_store is not None:
         stored = traffic_store.record_vehicle(
             session_id=SERVER_SESSION_ID,
-            camera_ip=camera_ip,
+            camera=camera,
             track_id=track_id,
             vehicle_type=vehicle_type,
             direction=direction,
@@ -335,7 +338,7 @@ def _maybe_count_object(camera_ip, state, *, track_id, cls_id, vehicle_type,
 
     log.info(
         "Vehicle counted camera=%s type=%s track=%s direction=%s confidence=%.2f stored=%s",
-        camera_ip,
+        camera_key,
         vehicle_type,
         track_id,
         direction,
@@ -344,7 +347,7 @@ def _maybe_count_object(camera_ip, state, *, track_id, cls_id, vehicle_type,
     )
 
 
-def _annotate_tracking(camera_ip, frame, result, model, history, last_seen,
+def _annotate_tracking(camera, frame, result, model, history, last_seen,
                        processed_index, inference_ms, count_state):
     persons = 0
     vehicles = 0
@@ -411,7 +414,7 @@ def _annotate_tracking(camera_ip, frame, result, model, history, last_seen,
                         cv2.line(frame, p1, p2, color, 2, cv2.LINE_AA)
 
                 _maybe_count_object(
-                    camera_ip,
+                    camera,
                     count_state,
                     track_id=track_id,
                     cls_id=cls_id,
@@ -434,31 +437,33 @@ def _annotate_tracking(camera_ip, frame, result, model, history, last_seen,
     return persons, vehicles, dict(class_counts)
 
 
-def ai_tracking_worker(camera_ip: str):
+def ai_tracking_worker(camera: dict):
+    camera_key = camera["camera_key"]
+    camera_ip = camera["camera_ip"]
     """Process the latest captured frame with YOLO + ByteTrack.
 
     This worker consumes latest_cv_frames populated by capture_stream(); it never
     opens the camera or constructs an RTSP URL.
     """
-    set_ai_status(camera_ip, enabled=True, model_loaded=False, last_error=None)
+    set_ai_status(camera_key, enabled=True, model_loaded=False, last_error=None)
 
     try:
         from ultralytics import YOLO
     except Exception as exc:
         msg = f"Ultralytics import failed: {exc}"
-        log.exception("AI disabled camera=%s: %s", camera_ip, msg)
-        set_ai_status(camera_ip, model_loaded=False, last_error=msg, last_error_at=time.time())
+        log.exception("AI disabled camera=%s: %s", camera_key, msg)
+        set_ai_status(camera_key, model_loaded=False, last_error=msg, last_error_at=time.time())
         return
 
     try:
-        log.info("Loading YOLO model camera=%s model=%s", camera_ip, Config.YOLO_MODEL)
+        log.info("Loading YOLO model camera=%s model=%s", camera_key, Config.YOLO_MODEL)
         model = YOLO(Config.YOLO_MODEL)
-        set_ai_status(camera_ip, model_loaded=True, last_error=None)
-        log.info("AI tracker ready camera=%s classes=%s", camera_ip, Config.TARGET_CLASSES)
+        set_ai_status(camera_key, model_loaded=True, last_error=None)
+        log.info("AI tracker ready camera=%s classes=%s", camera_key, Config.TARGET_CLASSES)
     except Exception as exc:
         msg = f"YOLO model load failed: {exc}"
-        log.exception("AI disabled camera=%s: %s", camera_ip, msg)
-        set_ai_status(camera_ip, model_loaded=False, last_error=msg, last_error_at=time.time())
+        log.exception("AI disabled camera=%s: %s", camera_key, msg)
+        set_ai_status(camera_key, model_loaded=False, last_error=msg, last_error_at=time.time())
         return
 
     last_seq = -1
@@ -469,12 +474,12 @@ def ai_tracking_worker(camera_ip: str):
     processed_index = 0
     count_state = _new_traffic_state()
     with lock:
-        traffic_state[camera_ip] = count_state
+        traffic_state[camera_key] = count_state
 
     while True:
         with lock:
-            frame = latest_cv_frames.get(camera_ip)
-            seq = int(frame_sequence.get(camera_ip) or 0)
+            frame = latest_cv_frames.get(camera_key)
+            seq = int(frame_sequence.get(camera_key) or 0)
 
         if frame is None or seq == last_seq:
             time.sleep(0.02)
@@ -511,7 +516,7 @@ def ai_tracking_worker(camera_ip: str):
             result = results[0] if results else None
             if result is not None:
                 persons, vehicles, class_counts = _annotate_tracking(
-                    camera_ip,
+                    camera,
                     work,
                     result,
                     model,
@@ -537,8 +542,8 @@ def ai_tracking_worker(camera_ip: str):
             jpeg = encoded.tobytes()
             now = time.time()
             with lock:
-                tracked_frames[camera_ip] = jpeg
-                row = ai_status.setdefault(camera_ip, default_ai_row())
+                tracked_frames[camera_key] = jpeg
+                row = ai_status.setdefault(camera_key, default_ai_row())
                 row["model_loaded"] = True
                 row["tracked_frames"] = int(row.get("tracked_frames") or 0) + 1
                 row["last_jpeg_bytes"] = len(jpeg)
@@ -555,20 +560,20 @@ def ai_tracking_worker(camera_ip: str):
         except Exception as exc:
             msg = f"AI inference failed: {exc}"
             log.exception("%s camera=%s", msg, camera_ip)
-            set_ai_status(camera_ip, last_error=msg, last_error_at=time.time())
+            set_ai_status(camera_key, last_error=msg, last_error_at=time.time())
             time.sleep(0.5)
 
 
-def generate_mjpeg(camera_ip: str, source: str = "raw"):
+def generate_mjpeg(camera_key: str, source: str = "raw"):
     last_log = 0.0
     while True:
         with lock:
             if source == "ai":
-                jpeg = tracked_frames.get(camera_ip)
-                err = (ai_status.get(camera_ip) or {}).get("last_error")
+                jpeg = tracked_frames.get(camera_key)
+                err = (ai_status.get(camera_key) or {}).get("last_error")
             else:
-                jpeg = output_frames.get(camera_ip)
-                err = (camera_status.get(camera_ip) or {}).get("last_error")
+                jpeg = output_frames.get(camera_key)
+                err = (camera_status.get(camera_key) or {}).get("last_error")
 
         if jpeg is None:
             now = time.time()
@@ -576,7 +581,7 @@ def generate_mjpeg(camera_ip: str, source: str = "raw"):
                 log.warning(
                     "MJPEG client waiting for first %s frame camera=%s error=%s",
                     source,
-                    camera_ip,
+                    camera_key,
                     err or "no frame available yet",
                 )
                 last_log = now
@@ -606,22 +611,22 @@ def health():
     now = time.time()
     cameras = {}
     with lock:
-        for ip in allowed_ips():
-            st = dict(camera_status.get(ip) or {})
-            ai = dict(ai_status.get(ip) or default_ai_row())
+        for key in allowed_keys():
+            st = dict(camera_status.get(key) or {})
+            ai = dict(ai_status.get(key) or default_ai_row())
             last = st.get("last_frame_at")
             ai_last = ai.get("last_processed_at")
-            cameras[ip] = {
+            cameras[key] = {
                 "connected": bool(st.get("connected")),
                 "frames": int(st.get("frames") or 0),
                 "last_jpeg_bytes": int(st.get("last_jpeg_bytes") or 0),
                 "age_seconds": None if last is None else round(now - last, 2),
                 "last_error": st.get("last_error"),
-                "has_frame": ip in output_frames,
+                "has_frame": key in output_frames,
                 "ai": {
                     "enabled": bool(ai.get("enabled", True)),
                     "model_loaded": bool(ai.get("model_loaded")),
-                    "has_frame": ip in tracked_frames,
+                    "has_frame": key in tracked_frames,
                     "tracked_frames": int(ai.get("tracked_frames") or 0),
                     "last_jpeg_bytes": int(ai.get("last_jpeg_bytes") or 0),
                     "age_seconds": None if ai_last is None else round(now - ai_last, 2),
@@ -667,7 +672,7 @@ def vehicle_counts():
 
     event_date = (request.args.get("date") or "").strip() or None
     camera_ip = (request.args.get("camera_ip") or "").strip() or None
-    if camera_ip and camera_ip not in allowed_ips():
+    if camera_ip and camera_ip not in allowed_keys():
         abort(404, description="Camera not configured")
 
     try:
@@ -686,7 +691,7 @@ def hourly_counts():
 
     event_date = (request.args.get("date") or "").strip() or None
     camera_ip = (request.args.get("camera_ip") or "").strip() or None
-    if camera_ip and camera_ip not in allowed_ips():
+    if camera_ip and camera_ip not in allowed_keys():
         abort(404, description="Camera not configured")
 
     try:
@@ -712,72 +717,74 @@ def recent_vehicle_events():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
-@app.route("/snapshot/<camera_ip>")
-def snapshot(camera_ip):
-    if camera_ip not in allowed_ips():
+@app.route("/snapshot/<camera_key>")
+def snapshot(camera_key):
+    if camera_key not in allowed_keys():
         abort(404, description="Camera not configured")
     with lock:
-        jpeg = output_frames.get(camera_ip)
-        err = (camera_status.get(camera_ip) or {}).get("last_error")
+        jpeg = output_frames.get(camera_key)
+        err = (camera_status.get(camera_key) or {}).get("last_error")
     if not jpeg:
         return jsonify({
             "ok": False,
-            "error": err or f"No JPEG frame received yet from {camera_ip}",
+            "error": err or f"No JPEG frame received yet from {camera_key}",
         }), 503
     return Response(jpeg, mimetype="image/jpeg")
 
 
-@app.route("/ai_snapshot/<camera_ip>")
-def ai_snapshot(camera_ip):
-    if camera_ip not in allowed_ips():
+@app.route("/ai_snapshot/<camera_key>")
+def ai_snapshot(camera_key):
+    if camera_key not in allowed_keys():
         abort(404, description="Camera not configured")
     with lock:
-        jpeg = tracked_frames.get(camera_ip)
-        err = (ai_status.get(camera_ip) or {}).get("last_error")
+        jpeg = tracked_frames.get(camera_key)
+        err = (ai_status.get(camera_key) or {}).get("last_error")
     if not jpeg:
         return jsonify({
             "ok": False,
-            "error": err or f"No AI frame available yet from {camera_ip}",
+            "error": err or f"No AI frame available yet from {camera_key}",
         }), 503
     return Response(jpeg, mimetype="image/jpeg")
 
 
-@app.route("/video_feed/<camera_ip>")
-def video_feed(camera_ip):
+@app.route("/video_feed/<camera_key>")
+def video_feed(camera_key):
     """Original raw MJPEG endpoint retained unchanged for fallback/testing."""
-    if camera_ip not in allowed_ips():
+    if camera_key not in allowed_keys():
         abort(404, description="Camera not configured")
     return Response(
-        generate_mjpeg(camera_ip, "raw"),
+        generate_mjpeg(camera_key, "raw"),
         mimetype="multipart/x-mixed-replace; boundary=frame",
         headers={"X-Accel-Buffering": "no"},
     )
 
 
-@app.route("/tracked_feed/<camera_ip>")
-def tracked_feed(camera_ip):
+@app.route("/tracked_feed/<camera_key>")
+def tracked_feed(camera_key):
     """AI-annotated MJPEG generated from the existing captured frames."""
-    if camera_ip not in allowed_ips():
+    if camera_key not in allowed_keys():
         abort(404, description="Camera not configured")
     return Response(
-        generate_mjpeg(camera_ip, "ai"),
+        generate_mjpeg(camera_key, "ai"),
         mimetype="multipart/x-mixed-replace; boundary=frame",
         headers={"X-Accel-Buffering": "no"},
     )
 
 
 if __name__ == "__main__":
-    cameras = allowed_ips()
+    cameras = Config.CAMERAS
 
     # Start the original capture threads first.
-    for ip in cameras:
-        t = threading.Thread(target=capture_stream, args=(ip,), daemon=True, name=f"capture-{ip}")
+    for cam in cameras:
+        camera_key = cam["camera_key"]
+        t = threading.Thread(target=capture_stream, args=(cam,), daemon=True, name=f"capture-{camera_key}")
         t.start()
 
     # AI workers consume latest_cv_frames from those capture threads. There is one
     # tracker/model instance per camera so ByteTrack IDs cannot leak across feeds.
-    for ip in cameras:
-        t = threading.Thread(target=ai_tracking_worker, args=(ip,), daemon=True, name=f"ai-{ip}")
+    for cam in cameras:
+        camera_key = cam["camera_key"]
+        t = threading.Thread(target=ai_tracking_worker, args=(cam,), daemon=True, name=f"ai-{camera_key}")
         t.start()
 
     log.info(

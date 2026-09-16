@@ -3,7 +3,7 @@
   const qa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const config = window.CCTV_UI_CONFIG || {};
   const baseUrl = config.baseUrl || (config.healthUrl || 'http://127.0.0.1:5000/health').replace('/health', '');
-  const cameraIps = Array.isArray(config.cameraIps) ? config.cameraIps : [];
+  const cameras = Array.isArray(config.cameras) ? config.cameras : [];
 
   function setText(id, value) {
     const el = q(`#${id}`);
@@ -192,7 +192,7 @@
   }
 
   function setSystemState(liveCount, aiLiveCount, aiErrors, reachable) {
-    const total = cameraIps.length;
+    const total = cameras.length;
     const system = q('#systemLive');
     const label = q('span', system);
     system?.classList.remove('offline', 'pending');
@@ -227,9 +227,11 @@
       let aiLiveCount = 0;
       let aiErrors = 0;
 
-      cameraIps.forEach((ip, index) => {
+      cameras.forEach((cam, index) => {
         const number = index + 1;
-        const st = data?.cameras?.[ip] || {};
+        const key = cam.camera_key;
+        const number = index + 1;
+        const st = data?.cameras?.[key] || {};
         const ai = st?.ai || {};
         const rawLive = Boolean(st.connected && st.has_frame);
         const aiLive = Boolean(ai.model_loaded && ai.has_frame && !ai.last_error);
@@ -256,7 +258,7 @@
       updateAdvancedModels(data?.advanced_models || {});
       setSystemState(liveCount, aiLiveCount, aiErrors, true);
     } catch (error) {
-      cameraIps.forEach((_, index) => setCameraState(index + 1, false, 'BACKEND OFFLINE'));
+      cameras.forEach((_, index) => setCameraState(index + 1, false, 'BACKEND OFFLINE'));
       setSystemState(0, 0, 0, false);
     }
   }
@@ -292,8 +294,10 @@
       setText('todayNoHelmetCount', fmt(data.no_helmet));
 
       const cameraMap = new Map((data.by_camera || []).map((row) => [row.camera_ip, row]));
-      cameraIps.forEach((ip, index) => {
-        setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(ip)?.total));
+      cameras.forEach((cam, index) => {
+        const number = index + 1;
+        const key = cam.camera_key;
+        setText(`cameraTodayCount${index + 1}`, fmt(cameraMap.get(cam.camera_key)?.total));
       });
     } catch (_) {
       setText('todayVehicleCount', '—');
@@ -339,7 +343,7 @@
 
     const cameraBody = q('#tblCameraReport tbody');
     if (cameraBody) {
-      const cameraNames = new Map(cameraIps.map((ip, index) => [ip, `Camera ${index + 1}`]));
+      const cameraNames = new Map(cameras.map((cam) => [cam.camera_key, cam.name]));
       cameraBody.innerHTML = (data.by_camera || []).length
         ? data.by_camera.map((row) => `<tr><td><b>${esc(cameraNames.get(row.camera_ip) || 'Camera')}</b></td><td><code>${esc(row.camera_ip)}</code></td>${vehicleCells(row)}</tr>`).join('')
         : '<tr><td colspan="8" class="empty-row">No camera counts in this period</td></tr>';
@@ -435,11 +439,11 @@
         const rows = data.by_camera || [];
         cameraTbody.innerHTML = rows.length
           ? rows.map((r) => {
-              const camIndex = config.cameraIps.indexOf(r.camera_ip);
-              const camName = camIndex >= 0 ? `Camera ${camIndex + 1}` : 'Camera';
+              const camObj = cameras.find(c => c.camera_key === (r.camera_key || r.camera_ip));
+              const camName = camObj ? camObj.name : 'Camera';
               return `<tr>
                 <td><b>${esc(camName)}</b></td>
-                <td><code>${esc(r.camera_ip)}</code></td>
+                <td><code>${esc(r.camera_key || r.camera_ip)}</code></td>
                 <td>${fmt(r.person)}</td>
                 <td>${fmt(r.car)}</td>
                 <td>${fmt(r.motorcycle)}</td>
