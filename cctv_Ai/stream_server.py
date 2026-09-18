@@ -37,7 +37,7 @@ ai_status = {}
 traffic_state = {}
 SERVER_SESSION_ID = uuid.uuid4().hex[:16]
 
-lock = threading.Lock()
+lock = threading.RLock()
 # Serialize heavy YOLO inference across cameras so CPU/GPU work cannot starve
 # the RTSP capture threads. Each camera still has its own model/tracker state.
 inference_lock = threading.Lock()
@@ -100,21 +100,23 @@ def _clear_camera_buffers(camera_key: str):
 
 
 def rtsp_url(camera: dict) -> str:
+    """Build RTSP URL without hard-coding credentials in source control."""
     camera_ip = camera["camera_ip"]
     user = Config.CAMERA_USERNAME
     password = Config.CAMERA_PASSWORD
-    
-    # Use different credentials for the new cameras
-    if camera_ip in ["192.168.0.252", "192.168.0.246", "192.168.0.253", "192.168.0.249"]:
-        user = "admin"
-        password = "Iccc@789"
-        
-    user_quoted = urllib.parse.quote(user)
-    password_quoted = urllib.parse.quote(password)
-    
+    recorder_ips = {
+        value.strip()
+        for value in os.getenv("RECORDER_CAMERA_IPS", "").split(",")
+        if value.strip()
+    }
+    if camera_ip in recorder_ips:
+        user = os.getenv("RECORDER_CAMERA_USERNAME", user)
+        password = os.getenv("RECORDER_CAMERA_PASSWORD", password)
+
     return (
-        f"rtsp://{user_quoted}:{password_quoted}@{camera_ip}:554/cam/realmonitor"
-        f"?channel={camera["channel_no"]}&subtype={Config.CAMERA_SUBTYPE}"
+        f"rtsp://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(password, safe='')}"
+        f"@{camera_ip}:554/cam/realmonitor"
+        f"?channel={int(camera['channel_no'])}&subtype={Config.CAMERA_SUBTYPE}"
     )
 
 
