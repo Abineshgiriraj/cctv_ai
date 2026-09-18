@@ -83,6 +83,10 @@ class Config:
     COUNTED_CLASSES = set(TARGET_CLASSES)
 
     AI_MAX_FPS = float(os.getenv("AI_MAX_FPS", 5))
+    # Large NVR deployments should only open/process the cameras on the current UI page.
+    PAGED_CAMERA_MODE = _bool("PAGED_CAMERA_MODE", True)
+    ACTIVE_CAMERA_LIMIT = max(1, min(16, int(os.getenv("ACTIVE_CAMERA_LIMIT", 8))))
+    AI_MODEL_IDLE_UNLOAD_SECONDS = max(2.0, float(os.getenv("AI_MODEL_IDLE_UNLOAD_SECONDS", 15)))
     YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", 640))
     YOLO_DEVICE = os.getenv("YOLO_DEVICE", "").strip()
     TRACK_TRAIL_LENGTH = int(os.getenv("TRACK_TRAIL_LENGTH", 18))
