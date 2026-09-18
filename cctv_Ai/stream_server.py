@@ -369,34 +369,39 @@ def _maybe_count_object(camera: dict, state, *, track_id, cls_id, vehicle_type,
         return
     if state["track_age"][track_id] < Config.COUNT_MIN_TRACK_AGE:
         return
+    if float(confidence) < Config.COUNT_MIN_CONFIDENCE:
+        return
 
     previous_y = previous[1]
     current_y = center[1]
-    direction = "in"
     if previous_y < line_y <= current_y:
         direction = "down"
     elif previous_y > line_y >= current_y:
         direction = "up"
+    else:
+        return
 
-    # Mark immediately so a transient DB error cannot produce repeated counts.
     state["counted_ids"].add(track_id)
     state["session_counts"][vehicle_type] += 1
     state["session_total"] += 1
 
     stored = False
     if traffic_store is not None:
-        stored = traffic_store.record_vehicle(
-            session_id=SERVER_SESSION_ID,
-            camera=camera,
-            track_id=track_id,
-            vehicle_type=vehicle_type,
-            direction=direction,
-            confidence=confidence,
-        )
+        try:
+            stored = traffic_store.record_vehicle(
+                session_id=SERVER_SESSION_ID,
+                camera=camera,
+                track_id=track_id,
+                vehicle_type=vehicle_type,
+                direction=direction,
+                confidence=confidence,
+            )
+        except Exception as exc:
+            log.exception("Vehicle storage failed camera=%s: %s", camera["camera_key"], exc)
 
     log.info(
         "Vehicle counted camera=%s type=%s track=%s direction=%s confidence=%.2f stored=%s",
-        camera_key,
+        camera["camera_key"],
         vehicle_type,
         track_id,
         direction,
