@@ -5,6 +5,7 @@ import time
 import logging
 import threading
 import uuid
+import gc
 from collections import defaultdict, deque
 from flask import Flask, Response, abort, jsonify, request
 
@@ -41,6 +42,12 @@ lock = threading.Lock()
 # the RTSP capture threads. Each camera still has its own model/tracker state.
 inference_lock = threading.Lock()
 
+# In paged-camera mode only the cameras visible on the current Live Monitoring
+# page open RTSP and run AI. This prevents 90+ simultaneous NVR streams/models
+# from exhausting the workstation and causing 10+ second inference latency.
+active_camera_keys = set()
+focus_initialized = False
+
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 try:
@@ -53,6 +60,43 @@ except Exception as exc:
 
 def allowed_keys():
     return [c["camera_key"] for c in Config.CAMERAS]
+
+
+def _ensure_initial_focus():
+    global focus_initialized
+    if not Config.PAGED_CAMERA_MODE:
+        return
+    with lock:
+        if not focus_initialized:
+            active_camera_keys.update(allowed_keys()[:Config.ACTIVE_CAMERA_LIMIT])
+            focus_initialized = True
+
+
+def is_camera_active(camera_key: str) -> bool:
+    if not Config.PAGED_CAMERA_MODE:
+        return True
+    _ensure_initial_focus()
+    with lock:
+        return camera_key in active_camera_keys
+
+
+def set_active_cameras(keys):
+    global focus_initialized
+    valid = [key for key in keys if key in allowed_keys()]
+    if Config.PAGED_CAMERA_MODE:
+        valid = valid[:Config.ACTIVE_CAMERA_LIMIT]
+    with lock:
+        active_camera_keys.clear()
+        active_camera_keys.update(valid if Config.PAGED_CAMERA_MODE else allowed_keys())
+        focus_initialized = True
+    return list(active_camera_keys)
+
+
+def _clear_camera_buffers(camera_key: str):
+    with lock:
+        output_frames.pop(camera_key, None)
+        latest_cv_frames.pop(camera_key, None)
+        tracked_frames.pop(camera_key, None)
 
 
 def rtsp_url(camera: dict) -> str:
@@ -100,6 +144,7 @@ def set_status(camera_key: str, **fields):
                 "last_frame_at": None,
                 "last_error": None,
                 "last_error_at": None,
+                "standby": False,
             },
         )
         row.update(fields)
@@ -133,17 +178,24 @@ def set_ai_status(camera_key: str, **fields):
 def capture_stream(camera: dict):
     camera_key = camera["camera_key"]
     camera_ip = camera["camera_ip"]
-    """Open the camera exactly once and publish both JPEG and raw OpenCV frames."""
-    url = rtsp_url(camera)
+    """Open RTSP only while this camera is active in the paged Live UI."""
     reconnect_delay = 3
 
     while True:
+        if not is_camera_active(camera_key):
+            _clear_camera_buffers(camera_key)
+            set_status(camera_key, connected=False, standby=True, last_error=None)
+            time.sleep(0.25)
+            continue
+
+        url = rtsp_url(camera)
         log.info(
             "Connecting RTSP camera=%s channel=%s subtype=%s transport=tcp",
             camera_key,
             camera["channel_no"],
             Config.CAMERA_SUBTYPE,
         )
+        set_status(camera_key, standby=False)
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -154,10 +206,11 @@ def capture_stream(camera: dict):
             msg = (
                 f"OpenCV could not open RTSP for {camera_ip}:554 "
                 f"(channel={camera['channel_no']}, subtype={Config.CAMERA_SUBTYPE}). "
-                "Check network, credentials, and that the camera RTSP service is up."
+                "Check network, credentials, channel availability, and RTSP service."
             )
             log.error(msg)
-            set_status(camera_key, connected=False, last_error=msg, last_error_at=time.time())
+            set_status(camera_key, connected=False, standby=False, last_error=msg, last_error_at=time.time())
+            cap.release()
             time.sleep(reconnect_delay)
             continue
 
@@ -165,10 +218,10 @@ def capture_stream(camera: dict):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         fps = cap.get(cv2.CAP_PROP_FPS) or 0
         log.info("RTSP open camera=%s size=%sx%s fps=%s", camera_key, width, height, fps)
-        set_status(camera_key, connected=True, last_error=None)
+        set_status(camera_key, connected=True, standby=False, last_error=None)
 
         fail_reads = 0
-        while True:
+        while is_camera_active(camera_key):
             ret, frame = cap.read()
             if not ret or frame is None:
                 fail_reads += 1
@@ -200,22 +253,25 @@ def capture_stream(camera: dict):
                 continue
 
             with lock:
-                # Preserve the original raw stream output.
                 output_frames[camera_key] = jpeg
-
-                # Share the same captured frame with the AI worker. No second RTSP
-                # connection is opened for detection/tracking.
                 latest_cv_frames[camera_key] = frame
                 frame_sequence[camera_key] = int(frame_sequence.get(camera_key) or 0) + 1
 
                 row = camera_status.setdefault(camera_key, {})
                 row["connected"] = True
+                row["standby"] = False
                 row["frames"] = int(row.get("frames") or 0) + 1
                 row["last_jpeg_bytes"] = len(jpeg)
                 row["last_frame_at"] = time.time()
                 row["last_error"] = None
 
         cap.release()
+        if not is_camera_active(camera_key):
+            log.info("Camera moved to standby camera=%s", camera_key)
+            _clear_camera_buffers(camera_key)
+            set_status(camera_key, connected=False, standby=True, last_error=None)
+            continue
+
         log.error("Reconnecting camera=%s in %ss", camera_key, reconnect_delay)
         time.sleep(reconnect_delay)
 
@@ -440,32 +496,11 @@ def _annotate_tracking(camera, frame, result, model, history, last_seen,
 def ai_tracking_worker(camera: dict):
     camera_key = camera["camera_key"]
     camera_ip = camera["camera_ip"]
-    """Process the latest captured frame with YOLO + ByteTrack.
+    """Run YOLO/ByteTrack only for active paged cameras and lazy-load the model."""
 
-    This worker consumes latest_cv_frames populated by capture_stream(); it never
-    opens the camera or constructs an RTSP URL.
-    """
     set_ai_status(camera_key, enabled=True, model_loaded=False, last_error=None)
-
-    try:
-        from ultralytics import YOLO
-    except Exception as exc:
-        msg = f"Ultralytics import failed: {exc}"
-        log.exception("AI disabled camera=%s: %s", camera_key, msg)
-        set_ai_status(camera_key, model_loaded=False, last_error=msg, last_error_at=time.time())
-        return
-
-    try:
-        log.info("Loading YOLO model camera=%s model=%s", camera_key, Config.YOLO_MODEL)
-        model = YOLO(Config.YOLO_MODEL)
-        set_ai_status(camera_key, model_loaded=True, last_error=None)
-        log.info("AI tracker ready camera=%s classes=%s", camera_key, Config.TARGET_CLASSES)
-    except Exception as exc:
-        msg = f"YOLO model load failed: {exc}"
-        log.exception("AI disabled camera=%s: %s", camera_key, msg)
-        set_ai_status(camera_key, model_loaded=False, last_error=msg, last_error_at=time.time())
-        return
-
+    model = None
+    last_active_at = 0.0
     last_seq = -1
     last_started = 0.0
     min_interval = 1.0 / max(Config.AI_MAX_FPS, 0.25)
@@ -477,6 +512,44 @@ def ai_tracking_worker(camera: dict):
         traffic_state[camera_key] = count_state
 
     while True:
+        if not is_camera_active(camera_key):
+            if model is not None and (time.time() - last_active_at) >= Config.AI_MODEL_IDLE_UNLOAD_SECONDS:
+                log.info("Unloading idle YOLO model camera=%s", camera_key)
+                model = None
+                history.clear()
+                last_seen.clear()
+                count_state = _new_traffic_state()
+                with lock:
+                    traffic_state[camera_key] = count_state
+                    tracked_frames.pop(camera_key, None)
+                set_ai_status(camera_key, model_loaded=False, last_error=None)
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            time.sleep(0.20)
+            continue
+
+        last_active_at = time.time()
+
+        if model is None:
+            try:
+                from ultralytics import YOLO
+                log.info("Loading YOLO model camera=%s model=%s", camera_key, Config.YOLO_MODEL)
+                model = YOLO(Config.YOLO_MODEL)
+                set_ai_status(camera_key, model_loaded=True, last_error=None)
+                log.info("AI tracker ready camera=%s classes=%s", camera_key, Config.TARGET_CLASSES)
+                last_seq = -1
+            except Exception as exc:
+                msg = f"YOLO model load failed: {exc}"
+                log.exception("AI disabled camera=%s: %s", camera_key, msg)
+                set_ai_status(camera_key, model_loaded=False, last_error=msg, last_error_at=time.time())
+                time.sleep(3)
+                continue
+
         with lock:
             frame = latest_cv_frames.get(camera_key)
             seq = int(frame_sequence.get(camera_key) or 0)
@@ -490,8 +563,6 @@ def ai_tracking_worker(camera: dict):
             time.sleep(min(remaining, 0.05))
             continue
 
-        # cap.read() supplies a new ndarray on subsequent reads. We still copy the
-        # selected frame so inference/annotation can never affect raw MJPEG output.
         work = frame.copy()
         last_seq = seq
         last_started = time.time()
@@ -603,7 +674,30 @@ def add_headers(resp):
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
+
+
+@app.route("/system/active_cameras", methods=["GET", "POST"])
+def active_cameras_api():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        keys = payload.get("camera_keys") or []
+        if not isinstance(keys, list):
+            return jsonify({"ok": False, "error": "camera_keys must be a list"}), 400
+        active = set_active_cameras([str(key) for key in keys])
+    else:
+        _ensure_initial_focus()
+        with lock:
+            active = list(active_camera_keys) if Config.PAGED_CAMERA_MODE else allowed_keys()
+    return jsonify({
+        "ok": True,
+        "paged_mode": Config.PAGED_CAMERA_MODE,
+        "limit": Config.ACTIVE_CAMERA_LIMIT,
+        "active_camera_keys": active,
+        "configured_total": len(allowed_keys()),
+    })
 
 
 @app.route("/health")
@@ -618,6 +712,8 @@ def health():
             ai_last = ai.get("last_processed_at")
             cameras[key] = {
                 "connected": bool(st.get("connected")),
+                "active": is_camera_active(key),
+                "standby": bool(st.get("standby")),
                 "frames": int(st.get("frames") or 0),
                 "last_jpeg_bytes": int(st.get("last_jpeg_bytes") or 0),
                 "age_seconds": None if last is None else round(now - last, 2),
@@ -651,9 +747,17 @@ def health():
         except Exception as exc:
             log.warning("Unable to read traffic counts: %s", exc)
 
+    _ensure_initial_focus()
+    with lock:
+        active_list = list(active_camera_keys) if Config.PAGED_CAMERA_MODE else allowed_keys()
+
     return jsonify({
         "ok": live,
         "ai_ok": ai_live,
+        "paged_mode": Config.PAGED_CAMERA_MODE,
+        "active_camera_keys": active_list,
+        "active_camera_limit": Config.ACTIVE_CAMERA_LIMIT,
+        "configured_total": len(allowed_keys()),
         "cameras": cameras,
         "traffic": {
             "counting_enabled": Config.COUNTING_ENABLED,
