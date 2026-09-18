@@ -44,7 +44,7 @@
           <img src="${baseUrl}/analytics/road_event_image/${row.id}?t=${Date.now()}" alt="Road damage evidence" loading="lazy">
           <div class="road-evidence-body">
             <div><b>${esc(row.model_label)}</b><span class="damage-badge ${String(row.damage_level || 'Low').toLowerCase()}">${esc(row.damage_level)}</span></div>
-            <p>${esc(camName(row.camera_ip))} · ${esc(camArea(row.camera_ip))}</p>
+            <p>${esc(camName(row.camera_key || row.camera_ip))} · ${esc(camArea(row.camera_key || row.camera_ip))}</p>
             <small>AI confidence ${Math.round(Number(row.confidence || 0) * 100)}%</small>
           </div>
         </article>`).join('');
