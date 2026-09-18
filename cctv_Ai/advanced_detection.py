@@ -134,6 +134,31 @@ class AdvancedDetector:
         return persons, bikes
 
     @staticmethod
+    def _primary_vehicles(result):
+        """Return all road-vehicle objects so plate OCR is not motorcycle-only."""
+        vehicles = []
+        boxes = getattr(result, "boxes", None)
+        if boxes is None:
+            return vehicles
+        for box in boxes:
+            try:
+                cls_id = int(box.cls[0].item())
+                if cls_id not in {1, 2, 3, 5, 7}:
+                    continue
+                conf = float(box.conf[0].item())
+                coords = [int(v) for v in box.xyxy[0].tolist()]
+                track_id = int(box.id[0].item()) if box.id is not None else None
+            except Exception:
+                continue
+            vehicles.append({
+                "box": coords,
+                "conf": conf,
+                "track_id": track_id,
+                "cls_id": cls_id,
+            })
+        return vehicles
+
+    @staticmethod
     def _rider_score(person_box, bike_box):
         px1, py1, px2, py2 = person_box
         bx1, by1, bx2, by2 = bike_box
@@ -295,21 +320,31 @@ class AdvancedDetector:
         return detections
 
     @staticmethod
-    def _match_plate_to_bike(bike_box, plate_detections):
-        bx1, by1, bx2, by2 = bike_box
-        bw, bh = max(1.0, bx2 - bx1), max(1.0, by2 - by1)
-        bcx, bcy = (bx1 + bx2) / 2.0, (by1 + by2) / 2.0
+    def _match_plate_to_vehicle(vehicle_box, plate_detections):
+        vx1, vy1, vx2, vy2 = vehicle_box
+        vw, vh = max(1.0, vx2 - vx1), max(1.0, vy2 - vy1)
+        vcx, vcy = (vx1 + vx2) / 2.0, (vy1 + vy2) / 2.0
         candidates = []
         for detection in plate_detections:
             px1, py1, px2, py2 = detection["box"]
             pcx, pcy = (px1 + px2) / 2.0, (py1 + py2) / 2.0
-            if not (bx1 - bw * 0.85 <= pcx <= bx2 + bw * 0.85):
+            # Plates can sit slightly outside a detector's vehicle box at distance,
+            # but should remain close to the vehicle and normally in its lower area.
+            if not (vx1 - vw * 0.20 <= pcx <= vx2 + vw * 0.20):
                 continue
-            if not (by1 - bh * 0.45 <= pcy <= by2 + bh * 0.95):
+            if not (vy1 + vh * 0.15 <= pcy <= vy2 + vh * 0.20):
                 continue
-            score = abs(pcx - bcx) / bw + abs(pcy - bcy) / bh - float(detection["confidence"]) * 0.30
+            score = (
+                abs(pcx - vcx) / vw
+                + abs(pcy - (vy1 + vh * 0.72)) / vh
+                - float(detection["confidence"]) * 0.35
+            )
             candidates.append((score, detection))
         return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+    @staticmethod
+    def _match_plate_to_bike(bike_box, plate_detections):
+        return AdvancedDetector._match_plate_to_vehicle(bike_box, plate_detections)
 
     @staticmethod
     def _plate_variants(crop):
