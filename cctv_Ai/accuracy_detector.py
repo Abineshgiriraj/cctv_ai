@@ -18,14 +18,14 @@ class AccuracyDetector(AdvancedDetector):
         self.helmet_confirm_frames = int(os.getenv("HELMET_CONFIRM_FRAMES", "3"))
         self.helmet_confirm_window = int(os.getenv("HELMET_CONFIRM_WINDOW", "7"))
         
-        self.helmet_conflict_margin = 0.12
+        self.helmet_conflict_margin = float(os.getenv("HELMET_CONFLICT_MARGIN", "0.12"))
 
-        self.road_tile_overlap = 0.18
+        self.road_tile_overlap = float(os.getenv("ROAD_TILE_OVERLAP", "0.18"))
         self.road_tile_columns = max(1, min(3, int(os.getenv("ROAD_TILE_COLUMNS", "2"))))
-        self.road_display_confidence = 0.12
+        self.road_display_confidence = float(os.getenv("ROAD_DISPLAY_CONFIDENCE", "0.12"))
         
         self._bike_motion_state = {}
-        self.helmet_tile_min_bike_motion_px = 8.0
+        self.helmet_tile_min_bike_motion_px = float(os.getenv("HELMET_TILE_MIN_BIKE_MOTION_PX", "0"))
         
         self.helmet_votes = defaultdict(lambda: deque(maxlen=self.helmet_confirm_window))
         self.log.info("AccuracyDetector initialized with multi-frame tracking logic.")
@@ -112,7 +112,7 @@ class AccuracyDetector(AdvancedDetector):
 
         try:
             results = model.predict(source, conf=self.helmet_observation_confidence,
-                                    imgsz=640, verbose=False)
+                                    imgsz=self.cfg.HELMET_IMGSZ, verbose=False)
         except Exception as exc:
             self.log.error(f"Helmet predict error: {exc}")
             return None
@@ -223,25 +223,39 @@ class AccuracyDetector(AdvancedDetector):
 
         if run_rider_ai:
             persons, bikes = self._primary_objects(primary_result, primary_model)
-            plate_detections = self._detect_plates_frame(clean_frame) if "plate" in self.models and bikes else []
+            vehicles = self._primary_vehicles(primary_result)
+            plate_detections = (
+                self._detect_plates_frame(clean_frame)
+                if "plate" in self.models and vehicles
+                else []
+            )
+            plate_by_vehicle = {}
+
+            # Number-plate detection/OCR now runs for cars, buses, trucks,
+            # motorcycles and bicycles instead of motorcycles only.
+            for vehicle in vehicles:
+                matched_plate = self._match_plate_to_vehicle(vehicle["box"], plate_detections)
+                if not matched_plate:
+                    continue
+                summary["plate_detected"] += 1
+                plate = self._plate_consensus(camera, vehicle, matched_plate)
+                if not plate:
+                    continue
+                plate_by_vehicle[self._track_key(camera, vehicle)] = plate
+
+                label = "PLATE"
+                if plate.get("confirmed") and plate.get("text"):
+                    label += f" {plate['text']}"
+                    summary["plate_read"] += 1
+                elif plate.get("raw_text"):
+                    label += f" ? {plate['raw_text']}"
+                else:
+                    label += " ?"
+                self._draw(draw_frame, plate["box"], label, (255, 160, 0))
 
             for bike in bikes:
                 rider = self._best_rider(persons, bike)
-                matched_plate = self._match_plate_to_bike(bike["box"], plate_detections)
-                plate = self._plate_consensus(camera, bike, matched_plate) if matched_plate else None
-                
-                if matched_plate: summary["plate_detected"] += 1
-                if plate:
-                    label = "PLATE"
-                    if plate.get("confirmed") and plate.get("text"):
-                        label += f" {plate['text']}"
-                        summary["plate_read"] += 1
-                    elif plate.get("raw_text"):
-                        label += f" ? {plate['raw_text']}"
-                    else:
-                        label += " ?"
-                    self._draw(draw_frame, plate["box"], label, (255, 160, 0))
-
+                plate = plate_by_vehicle.get(self._track_key(camera, bike))
                 observation = self._helmet_status(camera, clean_frame, bike, rider)
                 
                 track_id = bike.get("track_id")
