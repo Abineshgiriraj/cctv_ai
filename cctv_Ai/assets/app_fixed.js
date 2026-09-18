@@ -266,6 +266,7 @@
       setText('rptTotalBuses', fmt(s.bus));
       setText('rptTotalTrucks', fmt(s.truck));
       setText('rptTotalBicycles', fmt(s.bicycle));
+      setText('rptTotalOther', fmt(s.other));
       setText('rptGrandTotal', fmt(s.grand_total));
 
       const daily = q('#tblDailyReport tbody');
@@ -298,7 +299,20 @@
       if (!res.ok || !data.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       const rows = data.violations || [];
       setText('violationStatus', rows.length ? '' : 'No recent violations found.');
-      grid.innerHTML = rows.map(v => `<article class="violation-card"><div class="violation-image"><img src="${baseUrl}/analytics/violation_image/${v.id}/evidence" loading="lazy" alt="Violation evidence"></div><div class="violation-details"><div><strong>${esc(v.camera_key || v.camera_ip)}</strong><small>${esc(v.captured_at || '')}</small></div><span class="status-chip danger">NO HELMET</span></div></article>`).join('');
+      grid.innerHTML = rows.map(v => {
+        const key = v.camera_key || v.camera_ip;
+        const cam = cameras.find(c => c.camera_key === key);
+        const plate = v.plate_number || 'Plate not read';
+        return `<article class="violation-card">
+          <div class="violation-image"><img src="${baseUrl}/analytics/violation_image/${v.id}/evidence" loading="lazy" alt="Violation evidence"></div>
+          <div class="violation-body">
+            <b>${esc(cam?.name || key)}</b>
+            <div class="violation-meta"><span>${esc(cam?.area || '')}</span><span>${esc(v.captured_at || '')}</span></div>
+            <span class="status-chip danger">NO HELMET</span>
+            <span class="plate-pill">${esc(plate)}</span>
+          </div>
+        </article>`;
+      }).join('');
     } catch (err) {
       console.warn('Violation query failed', err);
       const status = q('#violationStatus');
