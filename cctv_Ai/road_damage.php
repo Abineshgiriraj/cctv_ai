@@ -40,4 +40,4 @@ render_page_start('road', 'Road Damage Monitoring', 'Detected road defects with 
     </section>
 </div>
 
-<?php render_page_end(['assets/road.js?v=1']); ?>
+<?php render_page_end(['assets/road.js?v=2']); ?>
