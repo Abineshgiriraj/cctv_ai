@@ -51,6 +51,42 @@ body { background: #06101a; }
 .section-heading h2 { margin:0; font-size:20px; }
 .section-heading p { margin:4px 0 0; color:var(--ops-muted); font-size:13px; }
 
+
+.camera-pagination-bar {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  margin:0 0 14px;
+  padding:12px 14px;
+  border:1px solid var(--ops-border);
+  border-radius:12px;
+  background:#08131f;
+}
+.camera-pagination-summary { display:flex; flex-direction:column; gap:2px; }
+.camera-pagination-summary strong { color:#f4f9fd; font-size:13px; }
+.camera-pagination-summary span { color:var(--ops-muted); font-size:11px; }
+.camera-pagination-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.camera-pagination-actions label { color:var(--ops-muted); font-size:11px; font-weight:800; }
+.camera-pagination-actions select,
+.camera-pagination-actions button {
+  height:34px;
+  border:1px solid var(--ops-border);
+  border-radius:8px;
+  background:#0b1724;
+  color:#dceaf5;
+  padding:0 10px;
+  font:inherit;
+  font-size:11px;
+  font-weight:800;
+}
+.camera-pagination-actions button { cursor:pointer; }
+.camera-pagination-actions button:disabled { opacity:.4; cursor:not-allowed; }
+.camera-pagination-actions button:not(:disabled):hover { border-color:#3f607e; color:#fff; }
+#cameraPageLabel { min-width:72px; text-align:center; color:#d7e8f5; font-size:11px; font-weight:800; }
+.operator-camera-card.camera-page-hidden { display:none; }
+.operator-camera-card.is-standby .cam-dot { background:#475569; box-shadow:0 0 0 4px rgba(71,85,105,.12); }
+
 .operator-camera-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
 .operator-camera-card {
   border:1px solid var(--ops-border);
@@ -154,6 +190,9 @@ body { background: #06101a; }
   .violations-grid { grid-template-columns:1fr 1fr; }
 }
 @media (max-width: 720px) {
+  .camera-pagination-bar { align-items:flex-start; flex-direction:column; }
+  .camera-pagination-actions { width:100%; }
+
   .operator-summary { grid-template-columns:1fr 1fr; }
   .report-filter-grid { grid-template-columns:1fr 1fr; }
   .report-actions { grid-column:1/-1; }
