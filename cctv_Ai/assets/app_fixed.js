@@ -266,9 +266,8 @@
     });
     try {
       const res = await fetch(`${baseUrl}/analytics/report?${params.toString()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`Report HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Report query failed');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.detail || data.error || `Report HTTP ${res.status}`);
       const s = data.summary || {};
       const reportMessage = q('#reportMessage');
       if (reportMessage) {
