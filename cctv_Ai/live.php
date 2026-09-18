@@ -9,6 +9,17 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
             <span id="cameraPageConfigured"><?= count($cameras) ?> configured</span>
         </div>
         <div class="camera-pagination-actions">
+            <label for="cameraRecorderFilter">Recorder</label>
+            <select id="cameraRecorderFilter" aria-label="Filter cameras by recorder IP">
+                <option value="">All recorders</option>
+                <?php
+                $recorderIps = [];
+                foreach ($cameras as $camera) $recorderIps[$camera['ip']] = true;
+                foreach (array_keys($recorderIps) as $recorderIp):
+                ?>
+                    <option value="<?= e($recorderIp) ?>"><?= e($recorderIp) ?></option>
+                <?php endforeach; ?>
+            </select>
             <label for="cameraPageSize">Show</label>
             <select id="cameraPageSize" aria-label="Cameras per page">
                 <option value="4">4 cameras</option>
