@@ -8,6 +8,7 @@
   let livePage = 1;
   let livePageSize = 8;
   let visibleCameraKeys = [];
+  let recorderFilter = '';
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
   const fmt = (value) => Number(value || 0).toLocaleString('en-IN');
@@ -19,9 +20,14 @@
 
   const cameraCard = (number) => q(`.operator-camera-card[data-camera-number="${number}"]`);
 
+  function filteredCameras() {
+    return recorderFilter ? cameras.filter(cam => cam.ip === recorderFilter) : cameras;
+  }
+
   function pageCameraRows() {
+    const rows = filteredCameras();
     const start = (livePage - 1) * livePageSize;
-    return cameras.slice(start, start + livePageSize);
+    return rows.slice(start, start + livePageSize);
   }
 
   async function syncBackendFocus(keys) {
@@ -58,23 +64,27 @@
     const pager = q('#cameraPagination');
     if (!pager) return;
 
-    const totalPages = Math.max(1, Math.ceil(cameras.length / livePageSize));
+    const rows = filteredCameras();
+    const totalPages = Math.max(1, Math.ceil(rows.length / livePageSize));
     livePage = Math.min(Math.max(1, livePage), totalPages);
     const start = (livePage - 1) * livePageSize;
-    const end = Math.min(cameras.length, start + livePageSize);
-    visibleCameraKeys = cameras.slice(start, end).map(cam => cam.camera_key);
+    const end = Math.min(rows.length, start + livePageSize);
+    const pageRows = rows.slice(start, end);
+    visibleCameraKeys = pageRows.map(cam => cam.camera_key);
+    const visibleSet = new Set(visibleCameraKeys);
 
     cameras.forEach((cam, index) => {
       const number = index + 1;
-      const visible = index >= start && index < end;
+      const visible = visibleSet.has(cam.camera_key);
       const card = cameraCard(number);
       card?.classList.toggle('camera-page-hidden', !visible);
       if (visible) loadVisibleStream(number);
       else unloadHiddenStream(number);
     });
 
-    setText('cameraPageSummary', cameras.length ? `Cameras ${start + 1}-${end}` : 'No cameras');
-    setText('cameraPageConfigured', `${cameras.length} configured`);
+    const prefix = recorderFilter ? `${recorderFilter} · ` : '';
+    setText('cameraPageSummary', rows.length ? `${prefix}Cameras ${start + 1}-${end}` : `${prefix}No cameras`);
+    setText('cameraPageConfigured', recorderFilter ? `${rows.length} on recorder · ${cameras.length} total` : `${cameras.length} configured`);
     setText('cameraPageLabel', `Page ${livePage} / ${totalPages}`);
     const prev = q('#cameraPrevPage');
     const next = q('#cameraNextPage');
@@ -87,7 +97,14 @@
   function initLivePagination() {
     if (!q('#cameraPagination')) return;
     const size = q('#cameraPageSize');
+    const recorder = q('#cameraRecorderFilter');
     livePageSize = Number(size?.value || 8) === 4 ? 4 : 8;
+    recorderFilter = recorder?.value || '';
+    recorder?.addEventListener('change', () => {
+      recorderFilter = recorder.value || '';
+      livePage = 1;
+      applyCameraPage();
+    });
     size?.addEventListener('change', () => {
       livePageSize = Number(size.value) === 4 ? 4 : 8;
       livePage = 1;
@@ -100,7 +117,7 @@
       }
     });
     q('#cameraNextPage')?.addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(cameras.length / livePageSize));
+      const totalPages = Math.max(1, Math.ceil(filteredCameras().length / livePageSize));
       if (livePage < totalPages) {
         livePage++;
         applyCameraPage();
