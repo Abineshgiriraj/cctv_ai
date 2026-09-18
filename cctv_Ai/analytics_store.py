@@ -20,7 +20,32 @@ class TrafficStore:
         self.user = user or os.getenv("DB_USER", "root")
         self.password = password if password is not None else os.getenv("DB_PASSWORD", "")
         self.database = database or os.getenv("DB_NAME", "cctv_ai")
+        self.evidence_dir = os.path.join(os.path.dirname(__file__), "data", "evidence")
+        self._ensure_database()
         self._initialize()
+
+    def _server_connect(self):
+        return pymysql.connect(
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            charset="utf8mb4",
+            autocommit=True,
+            connect_timeout=3,
+            read_timeout=5,
+            write_timeout=5,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+
+    def _ensure_database(self):
+        safe_name = str(self.database).replace("`", "``")
+        with self._server_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE DATABASE IF NOT EXISTS `{safe_name}` "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                )
 
     def _connect(self):
         return pymysql.connect(
@@ -31,6 +56,9 @@ class TrafficStore:
             database=self.database,
             charset="utf8mb4",
             autocommit=False,
+            connect_timeout=3,
+            read_timeout=8,
+            write_timeout=8,
             cursorclass=pymysql.cursors.DictCursor,
         )
 
@@ -146,8 +174,11 @@ class TrafficStore:
             return image_bytes
         import time
         import uuid
-        os.makedirs("data/evidence", exist_ok=True)
-        filename = f"data/evidence/{prefix}_{uuid.uuid4().hex[:8]}_{int(time.time())}.jpg"
+        os.makedirs(self.evidence_dir, exist_ok=True)
+        filename = os.path.join(
+            self.evidence_dir,
+            f"{prefix}_{uuid.uuid4().hex[:8]}_{int(time.time())}.jpg",
+        )
         with open(filename, "wb") as handle:
             handle.write(image_bytes)
         return filename
