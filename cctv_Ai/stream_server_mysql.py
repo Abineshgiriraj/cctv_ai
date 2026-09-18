@@ -15,6 +15,7 @@ from analytics_store import TrafficStore
 
 log = logging.getLogger("mjpeg-mysql")
 advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
+_advanced_lock = threading.Lock()
 _analytics_lock = threading.Lock()
 _analytics_last_error = None
 _analytics_last_attempt = 0.0
@@ -178,14 +179,15 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
         store = _ensure_analytics_store()
         if store is not None:
             advanced.store = store
-        summary = advanced.process(
-            camera,
-            clean_frame,
-            result,
-            model,
-            processed_index,
-            draw_frame=frame,
-        )
+        with _advanced_lock:
+            summary = advanced.process(
+                camera,
+                clean_frame,
+                result,
+                model,
+                processed_index,
+                draw_frame=frame,
+            )
         base.set_ai_status(camera["camera_key"], advanced=summary)
     except Exception as exc:
         log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
