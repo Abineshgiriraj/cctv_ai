@@ -71,13 +71,12 @@
     const url = `${baseUrl}/analytics/road_report?from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&camera_key=${encodeURIComponent(cameraKey)}&label=${encodeURIComponent(label)}&limit=250&t=${Date.now()}`;
     try {
       const response = await fetch(url, {cache:'no-store'});
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      if (!data.ok) throw new Error(data.error || 'Road report failed');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
       render(data);
     } catch (err) {
       console.warn('Road report error:', err);
-      setText('roadStatus', 'Unable to load road report');
+      setText('roadStatus', `Unable to load road report: ${err.message || err}`);
       const tbody = q('#roadTable tbody');
       if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="empty-row">Road report API is unavailable.</td></tr>';
     }
