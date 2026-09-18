@@ -30,9 +30,12 @@ def _image_bytes(value):
 
 
 def register_road_report_routes(app, store, allowed_keys, log):
+    def get_store():
+        return store() if callable(store) else store
     @app.route('/analytics/road_report')
     def road_report():
-        if store is None:
+        db = get_store()
+        if db is None:
             return jsonify({'ok': False, 'error': 'MySQL analytics store is unavailable'}), 503
 
         today = datetime.now().date().isoformat()
@@ -70,7 +73,7 @@ def register_road_report_routes(app, store, allowed_keys, log):
         """
 
         try:
-            with store._connect() as conn:
+            with db._connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, params)
                     rows = cur.fetchall()
@@ -122,10 +125,11 @@ def register_road_report_routes(app, store, allowed_keys, log):
 
     @app.route('/analytics/road_event_image/<int:event_id>')
     def road_event_image(event_id):
-        if store is None:
+        db = get_store()
+        if db is None:
             return jsonify({'ok': False, 'error': 'MySQL analytics store is unavailable'}), 503
         try:
-            with store._connect() as conn:
+            with db._connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute('SELECT evidence_image FROM road_events WHERE id=%s', (event_id,))
                     row = cur.fetchone()

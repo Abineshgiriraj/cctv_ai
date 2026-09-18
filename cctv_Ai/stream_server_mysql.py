@@ -11,9 +11,44 @@ import stream_server as base
 from rider_verified_detector import RiderVerifiedDetector
 from road_report_routes import register_road_report_routes
 from config import Config
+from analytics_store import TrafficStore
 
 log = logging.getLogger("mjpeg-mysql")
 advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
+_advanced_lock = threading.Lock()
+_analytics_lock = threading.Lock()
+_analytics_last_error = None
+_analytics_last_attempt = 0.0
+
+
+def _ensure_analytics_store(force=False):
+    """Reconnect analytics automatically if MySQL was unavailable during startup."""
+    global _analytics_last_error, _analytics_last_attempt
+    if base.traffic_store is not None:
+        if advanced.store is not base.traffic_store:
+            advanced.store = base.traffic_store
+        return base.traffic_store
+
+    now = time.time()
+    if not force and now - _analytics_last_attempt < 3.0:
+        return None
+
+    with _analytics_lock:
+        if base.traffic_store is not None:
+            advanced.store = base.traffic_store
+            return base.traffic_store
+        _analytics_last_attempt = time.time()
+        try:
+            store = TrafficStore(Config.ANALYTICS_DB)
+            base.traffic_store = store
+            advanced.store = store
+            _analytics_last_error = None
+            log.info("MySQL analytics store connected/recovered")
+            return store
+        except Exception as exc:
+            _analytics_last_error = str(exc)
+            log.error("MySQL analytics store unavailable: %s", exc)
+            return None
 
 
 def _json_safe(value):
@@ -98,9 +133,10 @@ def _patched_maybe_count_object(camera, state, *, track_id, cls_id, vehicle_type
     state["session_total"] += 1
 
     stored = False
-    if base.traffic_store is not None:
+    store = _ensure_analytics_store()
+    if store is not None:
         try:
-            stored = base.traffic_store.record_vehicle(
+            stored = store.record_vehicle(
                 session_id=base.SERVER_SESSION_ID,
                 camera=camera,
                 track_id=track_id,
@@ -140,14 +176,18 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
         count_state,
     )
     try:
-        summary = advanced.process(
-            camera,
-            clean_frame,
-            result,
-            model,
-            processed_index,
-            draw_frame=frame,
-        )
+        store = _ensure_analytics_store()
+        if store is not None:
+            advanced.store = store
+        with _advanced_lock:
+            summary = advanced.process(
+                camera,
+                clean_frame,
+                result,
+                model,
+                processed_index,
+                draw_frame=frame,
+            )
         base.set_ai_status(camera["camera_key"], advanced=summary)
     except Exception as exc:
         log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
@@ -160,8 +200,9 @@ base._annotate_tracking = _annotate_with_advanced
 
 @base.app.route("/analytics/report")
 def analytics_report():
-    if base.traffic_store is None:
-        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable"}), 503
+    store = _ensure_analytics_store()
+    if store is None:
+        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable", "detail": _analytics_last_error}), 503
 
     today = datetime.now().date().isoformat()
     from_date = (request.args.get("from_date") or today).strip()
@@ -174,7 +215,7 @@ def analytics_report():
         return jsonify({"ok": False, "error": "Camera not configured"}), 404
 
     try:
-        data = base.traffic_store.report(
+        data = store.report(
             from_date=from_date,
             to_date=to_date,
             from_time=from_time,
@@ -191,11 +232,12 @@ def analytics_report():
 
 @base.app.route("/analytics/today_summary")
 def today_summary():
-    if base.traffic_store is None:
-        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable"}), 503
+    store = _ensure_analytics_store()
+    if store is None:
+        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable", "detail": _analytics_last_error}), 503
     today = datetime.now().date().isoformat()
     try:
-        report = base.traffic_store.report(
+        report = store.report(
             from_date=today,
             to_date=today,
             from_time="00:00",
@@ -205,7 +247,7 @@ def today_summary():
             "ok": True,
             "date": today,
             "vehicles": int((report.get("summary") or {}).get("total") or 0),
-            "no_helmet": base.traffic_store.no_helmet_count(event_date=today),
+            "no_helmet": store.no_helmet_count(event_date=today),
             "by_camera": report.get("by_camera") or [],
         })
     except Exception as exc:
@@ -215,14 +257,15 @@ def today_summary():
 
 @base.app.route("/analytics/recent_violations")
 def recent_violations():
-    if base.traffic_store is None:
-        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable"}), 503
+    store = _ensure_analytics_store()
+    if store is None:
+        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable", "detail": _analytics_last_error}), 503
     try:
         limit = int(request.args.get("limit", 25))
     except ValueError:
         limit = 25
     try:
-        return jsonify({"ok": True, "violations": base.traffic_store.recent_violations(limit)})
+        return jsonify({"ok": True, "violations": store.recent_violations(limit)})
     except Exception as exc:
         log.exception("Violation query failed: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -232,15 +275,28 @@ def recent_violations():
 def violation_image(violation_id, image_type):
     if image_type not in {"evidence", "plate"}:
         return jsonify({"ok": False, "error": "Invalid image type"}), 400
-    if base.traffic_store is None:
-        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable"}), 503
-    image = base.traffic_store.violation_image(violation_id, image_type)
+    store = _ensure_analytics_store()
+    if store is None:
+        return jsonify({"ok": False, "error": "MySQL analytics store is unavailable", "detail": _analytics_last_error}), 503
+    image = store.violation_image(violation_id, image_type)
     if not image:
         return jsonify({"ok": False, "error": "Image not found"}), 404
     return Response(image, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
-register_road_report_routes(base.app, base.traffic_store, base.allowed_keys, log)
+register_road_report_routes(base.app, _ensure_analytics_store, base.allowed_keys, log)
+
+
+@base.app.route("/analytics/status")
+def analytics_status():
+    store = _ensure_analytics_store()
+    return jsonify({
+        "ok": store is not None,
+        "connected": store is not None,
+        "database": Config.DB_NAME,
+        "host": Config.DB_HOST,
+        "error": _analytics_last_error,
+    }), (200 if store is not None else 503)
 
 
 @base.app.route("/advanced/status")

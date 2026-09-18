@@ -5,6 +5,10 @@
   const baseUrl = cfg.baseUrl || 'http://127.0.0.1:5000';
   const healthUrl = cfg.healthUrl || `${baseUrl}/health`;
   const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+  let livePage = 1;
+  let livePageSize = 8;
+  let visibleCameraKeys = [];
+  let recorderFilter = '';
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
   const fmt = (value) => Number(value || 0).toLocaleString('en-IN');
@@ -14,14 +18,124 @@
 
   q('#menu')?.addEventListener('click', () => document.body.classList.toggle('nav-open'));
 
+  const cameraCard = (number) => q(`.operator-camera-card[data-camera-number="${number}"]`);
+
+  function filteredCameras() {
+    return recorderFilter ? cameras.filter(cam => cam.ip === recorderFilter) : cameras;
+  }
+
+  function pageCameraRows() {
+    const rows = filteredCameras();
+    const start = (livePage - 1) * livePageSize;
+    return rows.slice(start, start + livePageSize);
+  }
+
+  async function syncBackendFocus(keys) {
+    if (!q('#cameraPagination')) return;
+    try {
+      await fetch(`${baseUrl}/system/active_cameras`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        cache: 'no-store',
+        body: JSON.stringify({camera_keys: keys})
+      });
+    } catch (err) {
+      console.warn('Unable to update active camera page', err);
+    }
+  }
+
+  function loadVisibleStream(number) {
+    const img = q(`#cameraStream${number}`);
+    if (!img) return;
+    const mode = img.dataset.streamMode || 'ai';
+    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    if (!url) return;
+    const wanted = `${url}?page=${livePage}&t=${Date.now()}`;
+    if (!img.getAttribute('src')) img.src = wanted;
+  }
+
+  function unloadHiddenStream(number) {
+    const img = q(`#cameraStream${number}`);
+    if (!img) return;
+    img.removeAttribute('src');
+  }
+
+  function applyCameraPage() {
+    const pager = q('#cameraPagination');
+    if (!pager) return;
+
+    const rows = filteredCameras();
+    const totalPages = Math.max(1, Math.ceil(rows.length / livePageSize));
+    livePage = Math.min(Math.max(1, livePage), totalPages);
+    const start = (livePage - 1) * livePageSize;
+    const end = Math.min(rows.length, start + livePageSize);
+    const pageRows = rows.slice(start, end);
+    visibleCameraKeys = pageRows.map(cam => cam.camera_key);
+    const visibleSet = new Set(visibleCameraKeys);
+
+    cameras.forEach((cam, index) => {
+      const number = index + 1;
+      const visible = visibleSet.has(cam.camera_key);
+      const card = cameraCard(number);
+      card?.classList.toggle('camera-page-hidden', !visible);
+      if (visible) loadVisibleStream(number);
+      else unloadHiddenStream(number);
+    });
+
+    const prefix = recorderFilter ? `${recorderFilter} · ` : '';
+    setText('cameraPageSummary', rows.length ? `${prefix}Cameras ${start + 1}-${end}` : `${prefix}No cameras`);
+    setText('cameraPageConfigured', recorderFilter ? `${rows.length} on recorder · ${cameras.length} total` : `${cameras.length} configured`);
+    setText('cameraPageLabel', `Page ${livePage} / ${totalPages}`);
+    const prev = q('#cameraPrevPage');
+    const next = q('#cameraNextPage');
+    if (prev) prev.disabled = livePage <= 1;
+    if (next) next.disabled = livePage >= totalPages;
+
+    syncBackendFocus(visibleCameraKeys);
+  }
+
+  function initLivePagination() {
+    if (!q('#cameraPagination')) return;
+    const size = q('#cameraPageSize');
+    const recorder = q('#cameraRecorderFilter');
+    livePageSize = Number(size?.value || 8) === 4 ? 4 : 8;
+    recorderFilter = recorder?.value || '';
+    recorder?.addEventListener('change', () => {
+      recorderFilter = recorder.value || '';
+      livePage = 1;
+      applyCameraPage();
+    });
+    size?.addEventListener('change', () => {
+      livePageSize = Number(size.value) === 4 ? 4 : 8;
+      livePage = 1;
+      applyCameraPage();
+    });
+    q('#cameraPrevPage')?.addEventListener('click', () => {
+      if (livePage > 1) {
+        livePage--;
+        applyCameraPage();
+      }
+    });
+    q('#cameraNextPage')?.addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(filteredCameras().length / livePageSize));
+      if (livePage < totalPages) {
+        livePage++;
+        applyCameraPage();
+      }
+    });
+    applyCameraPage();
+  }
+
+
   function setCameraState(number, isLive, label) {
     const card = q(`.operator-camera-card[data-camera-number="${number}"]`);
     card?.classList.toggle('is-live', !!isLive);
+    card?.classList.toggle('is-standby', label === 'STANDBY');
     setText(`cameraState${number}`, label);
     q(`#streamMessage${number}`)?.classList.toggle('hidden', !!isLive);
   }
 
-  function setSystemState(liveCount, aiLiveCount, aiErrors, reachable) {
+  function setSystemState(liveCount, aiLiveCount, aiErrors, reachable, activeTotal = cameras.length) {
     const total = cameras.length;
     const pill = q('#systemLive');
     const label = q('span', pill);
@@ -33,15 +147,15 @@
       setText('aiDetectionStatus', 'OFFLINE');
       return;
     }
-    if (liveCount === total && total > 0) {
-      if (label) label.textContent = 'SYSTEM LIVE';
+    if (liveCount === activeTotal && activeTotal > 0) {
+      if (label) label.textContent = total > activeTotal ? `PAGE LIVE ${liveCount}/${activeTotal}` : 'SYSTEM LIVE';
     } else {
       pill?.classList.add('pending');
-      if (label) label.textContent = `PARTIAL STREAM ${liveCount}/${total}`;
+      if (label) label.textContent = `PAGE STREAM ${liveCount}/${activeTotal}`;
     }
-    setText('activeCameraCount', `${liveCount} / ${total}`);
+    setText('activeCameraCount', `${liveCount} / ${activeTotal}`);
     setText('aiDetectionStatus', aiErrors ? 'AI ERROR' : (aiLiveCount ? 'TRACKING' : 'STARTING'));
-    setText('aiDetectionText', `${aiLiveCount}/${total} AI feeds active`);
+    setText('aiDetectionText', `${aiLiveCount}/${activeTotal} active-page AI feeds`);
   }
 
   async function refreshHealth() {
@@ -52,6 +166,10 @@
       let liveCount = 0;
       let aiLiveCount = 0;
       let aiErrors = 0;
+      const activeKeys = Array.isArray(data.active_camera_keys) && data.active_camera_keys.length
+        ? data.active_camera_keys
+        : (visibleCameraKeys.length ? visibleCameraKeys : cameras.map(c => c.camera_key));
+      const activeSet = new Set(activeKeys);
 
       cameras.forEach((cam, index) => {
         const number = index + 1;
@@ -63,7 +181,12 @@
         const img = q(`#cameraStream${number}`);
         const mode = img?.dataset.streamMode || 'ai';
         const selectedLive = mode === 'ai' ? aiLive : rawLive;
+        const active = activeSet.has(key);
 
+        if (!active) {
+          setCameraState(number, false, 'STANDBY');
+          return;
+        }
         if (rawLive) liveCount++;
         if (aiLive) aiLiveCount++;
         if (ai.last_error) aiErrors++;
@@ -80,7 +203,7 @@
         setText(`inferenceMs${number}`, Number.isFinite(ms) ? `${Math.round(ms)} ms` : '—');
       });
 
-      setSystemState(liveCount, aiLiveCount, aiErrors, true);
+      setSystemState(liveCount, aiLiveCount, aiErrors, true, activeSet.size);
     } catch (err) {
       cameras.forEach((_, i) => setCameraState(i + 1, false, 'BACKEND OFFLINE'));
       setSystemState(0, 0, 0, false);
@@ -143,10 +266,15 @@
     });
     try {
       const res = await fetch(`${baseUrl}/analytics/report?${params.toString()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`Report HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Report query failed');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.detail || data.error || `Report HTTP ${res.status}`);
       const s = data.summary || {};
+      const reportMessage = q('#reportMessage');
+      if (reportMessage) {
+        reportMessage.classList.remove('error');
+        reportMessage.classList.add('success');
+        reportMessage.textContent = 'Vehicle count report loaded from MySQL.';
+      }
       setText('rptTotalPersons', fmt(s.person));
       setText('rptTotalVehicles', fmt(s.total));
       setText('rptTotalCars', fmt(s.car));
@@ -154,6 +282,7 @@
       setText('rptTotalBuses', fmt(s.bus));
       setText('rptTotalTrucks', fmt(s.truck));
       setText('rptTotalBicycles', fmt(s.bicycle));
+      setText('rptTotalOther', fmt(s.other));
       setText('rptGrandTotal', fmt(s.grand_total));
 
       const daily = q('#tblDailyReport tbody');
@@ -166,7 +295,15 @@
         const cam = cameras.find(c => c.camera_key === key);
         return `<tr><td><b>${esc(cam?.name || key)}</b></td><td><code>${esc(key)}</code></td><td>${fmt(r.person)}</td><td>${fmt(r.car)}</td><td>${fmt(r.motorcycle)}</td><td>${fmt(r.bus)}</td><td>${fmt(r.truck)}</td><td>${fmt(r.bicycle)}</td><td>${fmt(r.grand_total)}</td></tr>`;
       }).join('') || '<tr><td colspan="9">No data</td></tr>';
-    } catch (err) { console.warn('Report query failed', err); }
+    } catch (err) {
+      console.warn('Report query failed', err);
+      const reportMessage = q('#reportMessage');
+      if (reportMessage) {
+        reportMessage.classList.remove('success');
+        reportMessage.classList.add('error');
+        reportMessage.textContent = `Unable to load MySQL report: ${err.message || err}`;
+      }
+    }
   }
 
   async function fetchViolations() {
@@ -175,10 +312,31 @@
     try {
       const res = await fetch(`${baseUrl}/analytics/recent_violations?limit=20&t=${Date.now()}`, { cache: 'no-store' });
       const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       const rows = data.violations || [];
       setText('violationStatus', rows.length ? '' : 'No recent violations found.');
-      grid.innerHTML = rows.map(v => `<article class="violation-card"><div class="violation-image"><img src="${baseUrl}/analytics/violation_image/${v.id}/evidence" loading="lazy" alt="Violation evidence"></div><div class="violation-details"><div><strong>${esc(v.camera_key || v.camera_ip)}</strong><small>${esc(v.captured_at || '')}</small></div><span class="status-chip danger">NO HELMET</span></div></article>`).join('');
-    } catch (err) { console.warn('Violation query failed', err); }
+      grid.innerHTML = rows.map(v => {
+        const key = v.camera_key || v.camera_ip;
+        const cam = cameras.find(c => c.camera_key === key);
+        const plate = v.plate_number || 'Plate not read';
+        return `<article class="violation-card">
+          <div class="violation-image"><img src="${baseUrl}/analytics/violation_image/${v.id}/evidence" loading="lazy" alt="Violation evidence"></div>
+          <div class="violation-body">
+            <b>${esc(cam?.name || key)}</b>
+            <div class="violation-meta"><span>${esc(cam?.area || '')}</span><span>${esc(v.captured_at || '')}</span></div>
+            <span class="status-chip danger">NO HELMET</span>
+            <span class="plate-pill">${esc(plate)}</span>
+          </div>
+        </article>`;
+      }).join('');
+    } catch (err) {
+      console.warn('Violation query failed', err);
+      const status = q('#violationStatus');
+      if (status) {
+        status.classList.add('error');
+        status.textContent = `Unable to load helmet violations: ${err.message || err}`;
+      }
+    }
   }
 
   q('#reportFromDate')?.addEventListener('change', fetchReportData);
@@ -260,6 +418,7 @@
     lightboxImg.style.cursor = 'grab';
   });
 
+  initLivePagination();
   refreshHealth();
   refreshTodaySummary();
   fetchReportData();
