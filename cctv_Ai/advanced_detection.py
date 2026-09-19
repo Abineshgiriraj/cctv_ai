@@ -7,7 +7,16 @@ import cv2
 
 
 class AdvancedDetector:
-    """Helmet, motorcycle plate and road-damage detection on top of YOLO tracking."""
+    """Helmet, plate and road-damage detection on top of YOLO tracking."""
+
+    @staticmethod
+    def _resolve_model_path(path):
+        if not path:
+            return path
+        path = os.path.expandvars(os.path.expanduser(str(path)))
+        if os.path.isabs(path):
+            return path
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), path))
 
     def __init__(self, config, store, session_id, log):
         self.cfg = config
@@ -31,14 +40,18 @@ class AdvancedDetector:
             self.log.warning("Advanced detectors unavailable: %s", exc)
             return
 
-        for key, path in {
+        for key, configured_path in {
             "helmet": self.cfg.HELMET_MODEL,
             "plate": self.cfg.PLATE_MODEL,
             "road_damage": self.cfg.ROAD_DAMAGE_MODEL,
             "road_obstruction": self.cfg.ROAD_OBSTRUCTION_MODEL,
         }.items():
+            path = self._resolve_model_path(configured_path)
             if not path or not os.path.isfile(path):
-                self.log.warning("Advanced model missing name=%s path=%s", key, path)
+                self.log.warning(
+                    "Advanced model missing name=%s configured=%s resolved=%s",
+                    key, configured_path, path,
+                )
                 continue
             try:
                 model = YOLO(path)
@@ -50,7 +63,7 @@ class AdvancedDetector:
                     getattr(model, "names", {}),
                 )
             except Exception as exc:
-                self.log.warning("Unable to load %s model: %s", key, exc)
+                self.log.warning("Unable to load %s model from %s: %s", key, path, exc)
 
     def _load_ocr(self):
         if not self.cfg.OCR_ENABLED:
@@ -62,17 +75,22 @@ class AdvancedDetector:
         except Exception as exc:
             self.log.warning("OCR disabled: %s", exc)
 
-    @staticmethod
-    def readiness(config):
-        return {
-            name: {"configured_path": path, "available": bool(path and os.path.isfile(path))}
-            for name, path in {
-                "helmet": config.HELMET_MODEL,
-                "plate": config.PLATE_MODEL,
-                "road_damage": config.ROAD_DAMAGE_MODEL,
-                "road_obstruction": config.ROAD_OBSTRUCTION_MODEL,
-            }.items()
-        }
+    @classmethod
+    def readiness(cls, config):
+        result = {}
+        for name, configured_path in {
+            "helmet": config.HELMET_MODEL,
+            "plate": config.PLATE_MODEL,
+            "road_damage": config.ROAD_DAMAGE_MODEL,
+            "road_obstruction": config.ROAD_OBSTRUCTION_MODEL,
+        }.items():
+            resolved = cls._resolve_model_path(configured_path)
+            result[name] = {
+                "configured_path": configured_path,
+                "resolved_path": resolved,
+                "available": bool(resolved and os.path.isfile(resolved)),
+            }
+        return result
 
     def runtime_readiness(self):
         result = self.readiness(self.cfg)
