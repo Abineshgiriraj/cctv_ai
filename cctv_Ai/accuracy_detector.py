@@ -11,12 +11,12 @@ class AccuracyDetector(AdvancedDetector):
     def __init__(self, config, store, session_id, log):
         super().__init__(config, store, session_id, log)
 
-        self.helmet_observation_confidence = float(os.getenv("HELMET_OBSERVATION_CONFIDENCE", "0.25"))
-        self.no_helmet_final_avg_confidence = float(os.getenv("NO_HELMET_FINAL_AVG_CONFIDENCE", "0.48"))
-        self.strict_no_helmet_vote_ratio = float(os.getenv("STRICT_NO_HELMET_VOTE_RATIO", "0.60"))
+        self.helmet_observation_confidence = float(os.getenv("HELMET_OBSERVATION_CONFIDENCE", "0.15"))
+        self.no_helmet_final_avg_confidence = float(os.getenv("NO_HELMET_FINAL_AVG_CONFIDENCE", "0.20"))
+        self.strict_no_helmet_vote_ratio = float(os.getenv("STRICT_NO_HELMET_VOTE_RATIO", "0.50"))
         
-        self.helmet_confirm_frames = int(os.getenv("HELMET_CONFIRM_FRAMES", "3"))
-        self.helmet_confirm_window = int(os.getenv("HELMET_CONFIRM_WINDOW", "7"))
+        self.helmet_confirm_frames = int(os.getenv("HELMET_CONFIRM_FRAMES", "2"))
+        self.helmet_confirm_window = int(os.getenv("HELMET_CONFIRM_WINDOW", "4"))
         
         self.helmet_conflict_margin = float(os.getenv("HELMET_CONFLICT_MARGIN", "0.12"))
         self.helmet_head_bounds_required = os.getenv(
