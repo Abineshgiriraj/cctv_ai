@@ -11,6 +11,28 @@
   const camArea = (key) => cameraMap.get(key)?.area || 'Unknown Area';
   const setText = (id, v) => { const el = q(`#${id}`); if (el) el.textContent = v; };
 
+  async function loadRoadModelStatus() {
+    const el = q('#roadModelStatus');
+    if (!el) return;
+    try {
+      const response = await fetch(`${baseUrl}/advanced/status?t=${Date.now()}`, {cache:'no-store'});
+      const data = await response.json().catch(() => ({}));
+      const road = data?.models?.road_damage || {};
+      el.classList.remove('error', 'success');
+      if (response.ok && road.loaded) {
+        const classes = road.classes ? Object.values(road.classes).join(', ') : '';
+        el.classList.add('success');
+        el.textContent = `Road-damage model ready${classes ? ` · Classes: ${classes}` : ''}`;
+      } else {
+        el.classList.add('error');
+        el.textContent = `Road-damage model not loaded · ${road.resolved_path || road.configured_path || 'models/road_damage.pt'}`;
+      }
+    } catch (err) {
+      el.classList.add('error');
+      el.textContent = `Unable to read road model status: ${err.message || err}`;
+    }
+  }
+
   function render(data) {
     const rows = data.events || [];
     const summary = data.summary || {};
@@ -94,6 +116,8 @@
     loadRoadReport();
   });
 
+  loadRoadModelStatus();
   loadRoadReport();
+  setInterval(loadRoadModelStatus, 15000);
   setInterval(loadRoadReport, 10000);
 })();

@@ -21,6 +21,7 @@ render_page_start('road', 'Road Damage Monitoring', 'Detected road defects with 
     </div>
 </article>
 
+<div class="report-message" id="roadModelStatus">Checking road-damage detection model...</div>
 <div class="road-note"><i class="bi bi-info-circle"></i> Damage level is a rule-based operational priority derived from the detected class. Model confidence is shown separately and is not a physical engineering severity measurement.</div>
 
 <div class="road-layout">
@@ -40,4 +41,4 @@ render_page_start('road', 'Road Damage Monitoring', 'Detected road defects with 
     </section>
 </div>
 
-<?php render_page_end(['assets/road.js?v=2']); ?>
+<?php render_page_end(['assets/road.js?v=3']); ?>

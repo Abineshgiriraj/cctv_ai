@@ -113,15 +113,15 @@ class Config:
     ROAD_OBSTRUCTION_MODEL = os.getenv("ROAD_OBSTRUCTION_MODEL", os.path.join("models", "road_obstruction.pt"))
 
     ADVANCED_DETECTION_ENABLED = _bool("ADVANCED_DETECTION_ENABLED", True)
-    ADVANCED_EVERY_N_FRAMES = max(1, int(os.getenv("ADVANCED_EVERY_N_FRAMES", 3)))
+    ADVANCED_EVERY_N_FRAMES = max(1, int(os.getenv("ADVANCED_EVERY_N_FRAMES", 1)))
     ADVANCED_CONFIDENCE = float(os.getenv("ADVANCED_CONFIDENCE", 0.40))
 
     # Stage 3: helmet/no-helmet is decided independently from motorcycle confidence.
-    HELMET_CONFIDENCE = float(os.getenv("HELMET_CONFIDENCE", 0.50))
-    NO_HELMET_CONFIDENCE = float(os.getenv("NO_HELMET_CONFIDENCE", 0.68))
+    HELMET_CONFIDENCE = float(os.getenv("HELMET_CONFIDENCE", 0.25))
+    NO_HELMET_CONFIDENCE = float(os.getenv("NO_HELMET_CONFIDENCE", 0.20))
     HELMET_IMGSZ = max(640, int(os.getenv("HELMET_IMGSZ", 960)))
-    HELMET_CONFIRM_FRAMES = max(1, int(os.getenv("HELMET_CONFIRM_FRAMES", 3)))
-    HELMET_CONFIRM_WINDOW = max(HELMET_CONFIRM_FRAMES, int(os.getenv("HELMET_CONFIRM_WINDOW", 5)))
+    HELMET_CONFIRM_FRAMES = max(1, int(os.getenv("HELMET_CONFIRM_FRAMES", 2)))
+    HELMET_CONFIRM_WINDOW = max(HELMET_CONFIRM_FRAMES, int(os.getenv("HELMET_CONFIRM_WINDOW", 4)))
 
     PLATE_CONFIDENCE = float(os.getenv("PLATE_CONFIDENCE", 0.20))
     PLATE_IMGSZ = max(640, int(os.getenv("PLATE_IMGSZ", 960)))
@@ -130,9 +130,9 @@ class Config:
     PLATE_CONFIRM_READS = max(1, int(os.getenv("PLATE_CONFIRM_READS", 2)))
     PLATE_CONFIRM_WINDOW = max(PLATE_CONFIRM_READS, int(os.getenv("PLATE_CONFIRM_WINDOW", 5)))
 
-    ROAD_DAMAGE_CONFIDENCE = float(os.getenv("ROAD_DAMAGE_CONFIDENCE", 0.25))
+    ROAD_DAMAGE_CONFIDENCE = float(os.getenv("ROAD_DAMAGE_CONFIDENCE", 0.15))
     ROAD_DAMAGE_IMGSZ = max(640, int(os.getenv("ROAD_DAMAGE_IMGSZ", 960)))
-    ROAD_EVERY_N_FRAMES = max(1, int(os.getenv("ROAD_EVERY_N_FRAMES", 5)))
+    ROAD_EVERY_N_FRAMES = max(1, int(os.getenv("ROAD_EVERY_N_FRAMES", 3)))
     ROAD_ROI_TOP_RATIO = min(0.85, max(0.0, float(os.getenv("ROAD_ROI_TOP_RATIO", 0.22))))
 
     VIOLATION_COOLDOWN_SECONDS = max(10, int(os.getenv("VIOLATION_COOLDOWN_SECONDS", 90)))

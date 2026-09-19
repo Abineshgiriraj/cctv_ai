@@ -306,6 +306,28 @@
     }
   }
 
+  async function refreshHelmetModelStatus() {
+    const el = q('#helmetModelStatus');
+    if (!el) return;
+    try {
+      const res = await fetch(`${baseUrl}/advanced/status?t=${Date.now()}`, { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      const helmet = data?.models?.helmet || {};
+      el.classList.remove('error', 'success');
+      if (res.ok && helmet.loaded) {
+        const classes = helmet.classes ? Object.values(helmet.classes).join(', ') : '';
+        el.classList.add('success');
+        el.textContent = `Helmet model ready${classes ? ` · Classes: ${classes}` : ''}`;
+      } else {
+        el.classList.add('error');
+        el.textContent = `Helmet model not loaded · ${helmet.resolved_path || helmet.configured_path || 'models/helmet.pt'}`;
+      }
+    } catch (err) {
+      el.classList.add('error');
+      el.textContent = `Unable to read helmet model status: ${err.message || err}`;
+    }
+  }
+
   async function fetchViolations() {
     const grid = q('#violationsGrid');
     if (!grid) return;
@@ -423,8 +445,10 @@
   refreshTodaySummary();
   fetchReportData();
   fetchViolations();
+  refreshHelmetModelStatus();
   setInterval(refreshHealth, 3000);
   setInterval(refreshTodaySummary, 5000);
   setInterval(fetchReportData, 5000);
   setInterval(fetchViolations, 5000);
+  setInterval(refreshHelmetModelStatus, 15000);
 })();
