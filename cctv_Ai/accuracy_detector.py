@@ -19,6 +19,9 @@ class AccuracyDetector(AdvancedDetector):
         self.helmet_confirm_window = int(os.getenv("HELMET_CONFIRM_WINDOW", "7"))
         
         self.helmet_conflict_margin = float(os.getenv("HELMET_CONFLICT_MARGIN", "0.12"))
+        self.helmet_head_bounds_required = os.getenv(
+            "HELMET_HEAD_BOUNDS_REQUIRED", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         self.road_tile_overlap = float(os.getenv("ROAD_TILE_OVERLAP", "0.18"))
         self.road_tile_columns = max(1, min(3, int(os.getenv("ROAD_TILE_COLUMNS", "2"))))
@@ -107,12 +110,20 @@ class AccuracyDetector(AdvancedDetector):
         if crop is None or crop.size == 0:
             return None
 
-        source = crop
-        scale = 1.0
+        ch, cw = crop.shape[:2]
+        scale = 3.0 if max(ch, cw) < 180 else 2.0 if max(ch, cw) < 360 else 1.0
+        source = (
+            cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            if scale > 1.0 else crop
+        )
 
         try:
-            results = model.predict(source, conf=self.helmet_observation_confidence,
-                                    imgsz=self.cfg.HELMET_IMGSZ, verbose=False)
+            results = model.predict(
+                source,
+                conf=self.helmet_observation_confidence,
+                imgsz=self.cfg.HELMET_IMGSZ,
+                verbose=False,
+            )
         except Exception as exc:
             self.log.error(f"Helmet predict error: {exc}")
             return None
@@ -139,8 +150,14 @@ class AccuracyDetector(AdvancedDetector):
                         int(region[0] + x2 / scale), int(region[1] + y2 / scale)
                     ]
                     
-                    if not self._is_head_in_bounds(mapped, bike_box, person_box):
-                        self.log.info(f"Rejected out-of-bounds helmet detection on bike={bike.get('track_id')}")
+                    if (
+                        self.helmet_head_bounds_required
+                        and not self._is_head_in_bounds(mapped, bike_box, person_box)
+                    ):
+                        self.log.debug(
+                            "Rejected out-of-bounds helmet detection bike=%s",
+                            bike.get("track_id"),
+                        )
                         continue
                         
                     self.log.info(f"Observed on bike={bike.get('track_id')}: {raw_name} -> {status} (conf={confidence:.2f})")
@@ -207,6 +224,169 @@ class AccuracyDetector(AdvancedDetector):
             
         self.log.info(f"Bike {bike.get('track_id')} CONFIRMED {status} (avg={average:.2f})")
         return status, average, len(same), len(votes)
+
+    @staticmethod
+    def _box_iou(a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(1, (bx2 - bx1) * (by2 - by1))
+        return inter / float(area_a + area_b - inter)
+
+    def _road_sources(self, frame):
+        """Return the road ROI plus overlapping horizontal tiles for distant defects."""
+        roi, y_offset = self._road_roi(frame)
+        sources = [(roi, 0, y_offset)]
+        h, w = roi.shape[:2]
+        columns = max(1, int(self.road_tile_columns))
+        if columns <= 1 or w < 320:
+            return sources
+
+        tile_width = int((w + (columns - 1) * w * self.road_tile_overlap) / columns)
+        step = max(1, int(tile_width * (1.0 - self.road_tile_overlap)))
+        for idx in range(columns):
+            x1 = min(max(0, idx * step), max(0, w - 1))
+            x2 = w if idx == columns - 1 else min(w, x1 + tile_width)
+            if x2 - x1 < 120:
+                continue
+            sources.append((roi[:, x1:x2], x1, y_offset))
+        return sources
+
+    def _run_road_model(self, camera, frame, model_key, event_type, draw_frame=None):
+        model = self.models.get(model_key)
+        if model is None:
+            return []
+
+        if model_key == "road_damage":
+            threshold = min(
+                float(self.cfg.ROAD_DAMAGE_CONFIDENCE),
+                float(self.road_display_confidence),
+            )
+        else:
+            threshold = float(self.cfg.ADVANCED_CONFIDENCE)
+
+        candidates = []
+        names = getattr(model, "names", {})
+        for source, x_offset, y_offset in self._road_sources(frame):
+            if source is None or source.size == 0:
+                continue
+            try:
+                results = model.predict(
+                    source,
+                    conf=max(0.05, threshold),
+                    imgsz=self.cfg.ROAD_DAMAGE_IMGSZ,
+                    verbose=False,
+                )
+            except Exception as exc:
+                self.log.warning("%s inference failed: %s", model_key, exc)
+                continue
+
+            for result in results or []:
+                boxes = getattr(result, "boxes", None)
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    try:
+                        cls_id = int(box.cls[0].item())
+                        confidence = float(box.conf[0].item())
+                        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+                        label = str(
+                            names.get(cls_id, cls_id)
+                            if isinstance(names, dict)
+                            else names[cls_id]
+                        )
+                    except Exception:
+                        continue
+                    candidates.append({
+                        "label": label,
+                        "confidence": confidence,
+                        "box": [
+                            x1 + x_offset,
+                            y1 + y_offset,
+                            x2 + x_offset,
+                            y2 + y_offset,
+                        ],
+                    })
+
+        # Keep the highest-confidence detection when full ROI + tile inference overlap.
+        candidates.sort(key=lambda row: row["confidence"], reverse=True)
+        kept = []
+        for candidate in candidates:
+            duplicate = any(
+                candidate["label"].lower() == existing["label"].lower()
+                and self._box_iou(candidate["box"], existing["box"]) >= 0.35
+                for existing in kept
+            )
+            if not duplicate:
+                kept.append(candidate)
+
+        events = []
+        for detection in kept:
+            label = detection["label"]
+            confidence = detection["confidence"]
+            full_box = detection["box"]
+
+            if draw_frame is not None:
+                self._draw(
+                    draw_frame,
+                    full_box,
+                    f"ROAD {label.upper()} {confidence * 100:.0f}%",
+                    (0, 165, 255),
+                )
+
+            if self.store is None:
+                continue
+
+            cx = (full_box[0] + full_box[2]) // 2
+            cy = (full_box[1] + full_box[3]) // 2
+            spatial_key = (
+                camera["camera_key"],
+                event_type,
+                label.lower(),
+                int(cx / 120),
+                int(cy / 90),
+            )
+            now = time.time()
+            if now - self.last_road_event[spatial_key] < self.cfg.ROAD_EVENT_COOLDOWN_SECONDS:
+                continue
+
+            crop = self._crop(frame, full_box, 30)
+            try:
+                event_id = self.store.record_road_event(
+                    session_id=self.session_id,
+                    camera=camera,
+                    event_type=event_type,
+                    model_label=label,
+                    confidence=confidence,
+                    evidence_image=self._jpeg(crop if crop is not None else frame),
+                    metadata={
+                        "box": full_box,
+                        "road_roi_top_ratio": self.cfg.ROAD_ROI_TOP_RATIO,
+                        "tiled_inference": True,
+                    },
+                )
+            except Exception as exc:
+                self.log.exception(
+                    "Road event storage failed camera=%s label=%s: %s",
+                    camera["camera_key"], label, exc,
+                )
+                continue
+
+            self.last_road_event[spatial_key] = now
+            events.append({
+                "id": event_id,
+                "label": label,
+                "confidence": confidence,
+                "box": full_box,
+            })
+
+        return events
 
     def process(self, camera, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
