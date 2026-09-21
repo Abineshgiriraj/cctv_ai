@@ -301,12 +301,23 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
         "queued_at": now,
     }
 
-    if Config.ADVANCED_DETECTION_ENABLED:
+    run_advanced = (
+        Config.ADVANCED_DETECTION_ENABLED
+        and (
+            processed_index % Config.ADVANCED_EVERY_N_FRAMES == 0
+            or processed_index % Config.ROAD_EVERY_N_FRAMES == 0
+        )
+    )
+    if run_advanced:
         advanced_task = dict(base_task)
         advanced_task["frame"] = frame.copy()
         _put_latest_task(_advanced_latest_tasks, advanced_task)
 
-    if Config.INCIDENT_DETECTION_ENABLED:
+    run_incident = (
+        Config.INCIDENT_DETECTION_ENABLED
+        and processed_index % Config.INCIDENT_EVERY_N_FRAMES == 0
+    )
+    if run_incident:
         incident_task = dict(base_task)
         incident_task["frame"] = frame.copy()
         _put_latest_task(_incident_latest_tasks, incident_task)
