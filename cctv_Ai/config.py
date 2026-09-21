@@ -170,11 +170,17 @@ class Config:
     INCIDENT_DETECTION_ENABLED = _bool("INCIDENT_DETECTION_ENABLED", True)
     INCIDENT_EVERY_N_FRAMES = max(1, int(os.getenv("INCIDENT_EVERY_N_FRAMES", 1)))
     ACCIDENT_DETECTION_ENABLED = _bool("ACCIDENT_DETECTION_ENABLED", True)
-    ACCIDENT_CONFIRM_FRAMES = max(1, int(os.getenv("ACCIDENT_CONFIRM_FRAMES", 2)))
-    ACCIDENT_MIN_MOTION_RATIO = max(0.0005, float(os.getenv("ACCIDENT_MIN_MOTION_RATIO", 0.004)))
-    ACCIDENT_STOP_RATIO = min(0.95, max(0.05, float(os.getenv("ACCIDENT_STOP_RATIO", 0.35))))
-    ACCIDENT_PROXIMITY_RATIO = max(0.20, float(os.getenv("ACCIDENT_PROXIMITY_RATIO", 0.80)))
-    ACCIDENT_IOU_THRESHOLD = min(0.80, max(0.0, float(os.getenv("ACCIDENT_IOU_THRESHOLD", 0.01))))
+
+    # High-precision accident screening. Old .env files used very permissive
+    # values (2 frames, 0.01 IoU, 0.80 proximity), which flag normal traffic
+    # braking/queuing as accidents. Clamp those legacy values to safer minima.
+    ACCIDENT_CONFIRM_FRAMES = max(4, int(os.getenv("ACCIDENT_CONFIRM_FRAMES", 4)))
+    ACCIDENT_MIN_MOTION_RATIO = max(0.006, float(os.getenv("ACCIDENT_MIN_MOTION_RATIO", 0.006)))
+    ACCIDENT_STOP_RATIO = min(0.35, max(0.05, float(os.getenv("ACCIDENT_STOP_RATIO", 0.28))))
+    ACCIDENT_PROXIMITY_RATIO = min(0.55, max(0.20, float(os.getenv("ACCIDENT_PROXIMITY_RATIO", 0.50))))
+    ACCIDENT_IOU_THRESHOLD = min(0.80, max(0.08, float(os.getenv("ACCIDENT_IOU_THRESHOLD", 0.08))))
+    ACCIDENT_MIN_CLOSING_RATIO = max(0.05, float(os.getenv("ACCIDENT_MIN_CLOSING_RATIO", 0.18)))
+    ACCIDENT_PAIR_HISTORY = max(3, min(12, int(os.getenv("ACCIDENT_PAIR_HISTORY", 6))))
 
     # Fallen trees/branches/debris can be detected as persistent roadway
     # obstructions without a custom obstruction model.
