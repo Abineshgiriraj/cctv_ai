@@ -382,6 +382,8 @@
     document.body.classList.add('camera-modal-open');
   }
 
+  window.openCameraFocus = openCameraFocus;
+
   qa('[data-camera-popup]').forEach(frame => {
     frame.addEventListener('click', () => {
       const card = frame.closest('.operator-camera-card');
