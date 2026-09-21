@@ -140,7 +140,15 @@
     q(`#streamMessage${number}`)?.classList.toggle('hidden', !!isLive);
   }
 
-  function setSystemState(liveCount, aiLiveCount, aiErrors, reachable, activeTotal = cameras.length) {
+  function setSystemState(
+    liveCount,
+    aiLiveCount,
+    aiErrors,
+    reachable,
+    activeTotal = cameras.length,
+    monitorAll = false,
+    monitoredTotal = cameras.length
+  ) {
     const total = cameras.length;
     const pill = q('#systemLive');
     const label = q('span', pill);
@@ -152,6 +160,18 @@
       setText('aiDetectionStatus', 'OFFLINE');
       return;
     }
+
+    if (monitorAll) {
+      if (label) label.textContent = `MONITORING ALL ${monitoredTotal}`;
+      setText('activeCameraCount', `${monitoredTotal} / ${total}`);
+      setText('aiDetectionStatus', aiErrors ? 'AI WARNING' : 'ALL-CAMERA TRACKING');
+      setText(
+        'aiDetectionText',
+        `All ${monitoredTotal} cameras monitored in background · ${aiLiveCount}/${activeTotal} displayed AI feeds ready`
+      );
+      return;
+    }
+
     if (liveCount === activeTotal && activeTotal > 0) {
       if (label) label.textContent = total > activeTotal ? `PAGE LIVE ${liveCount}/${activeTotal}` : 'SYSTEM LIVE';
     } else {
@@ -208,7 +228,15 @@
         setText(`inferenceMs${number}`, Number.isFinite(ms) ? `${Math.round(ms)} ms` : '—');
       });
 
-      setSystemState(liveCount, aiLiveCount, aiErrors, true, activeSet.size);
+      setSystemState(
+        liveCount,
+        aiLiveCount,
+        aiErrors,
+        true,
+        activeSet.size,
+        !!data.monitor_all_cameras,
+        Number(data.monitored_total || cameras.length)
+      );
     } catch (err) {
       cameras.forEach((_, i) => setCameraState(i + 1, false, 'BACKEND OFFLINE'));
       setSystemState(0, 0, 0, false);
