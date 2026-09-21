@@ -192,6 +192,8 @@ def capture_stream(camera: dict):
     reconnect_delay = Config.RTSP_RECONNECT_SECONDS + (
         int(camera.get("channel_no") or 1) % 5
     ) * 0.35
+    live_encode_interval = 1.0 / max(Config.LIVE_STREAM_MAX_FPS, 1.0)
+    last_live_encode_at = 0.0
 
     while True:
         if not is_camera_active(camera_key):
@@ -266,6 +268,14 @@ def capture_stream(camera: dict):
                     row = camera_status.setdefault(camera_key, {})
                     row["last_jpeg_bytes"] = 0
                 continue
+
+            # Keep capture/AI fed by every decoded frame, but encode only enough
+            # frames for a smooth browser stream. Encoding every 25/30-FPS frame
+            # on 4-8 cards wastes CPU and can make RTSP/AI threads stall.
+            now = time.time()
+            if now - last_live_encode_at < live_encode_interval:
+                continue
+            last_live_encode_at = now
 
             ok, encoded = cv2.imencode(
                 ".jpg",
@@ -853,7 +863,7 @@ def shared_ai_worker(worker_id: int, cameras):
                     )
 
                 jpeg = None
-                if is_camera_focused(camera_key):
+                if Config.GENERATE_TRACKED_MJPEG and is_camera_focused(camera_key):
                     ok, encoded = cv2.imencode(
                         ".jpg",
                         work,

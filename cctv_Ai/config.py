@@ -91,6 +91,9 @@ class Config:
     RTSP_RECONNECT_SECONDS = max(
         1.0, float(os.getenv("RTSP_RECONNECT_SECONDS", 3.0))
     )
+    LIVE_STREAM_MAX_FPS = max(
+        2.0, min(20.0, float(os.getenv("LIVE_STREAM_MAX_FPS", 12.0)))
+    )
 
     YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
 
@@ -131,6 +134,7 @@ class Config:
     BACKGROUND_YOLO_IMGSZ = max(
         256, int(os.getenv("BACKGROUND_YOLO_IMGSZ", min(FOREGROUND_YOLO_IMGSZ, 384)))
     )
+    GENERATE_TRACKED_MJPEG = _bool("GENERATE_TRACKED_MJPEG", False)
     YOLO_DEVICE = os.getenv("YOLO_DEVICE", "").strip()
     TRACK_TRAIL_LENGTH = int(os.getenv("TRACK_TRAIL_LENGTH", 18))
     JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", 80))

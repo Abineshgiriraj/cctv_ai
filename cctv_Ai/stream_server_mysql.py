@@ -19,6 +19,15 @@ advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION
 incidents = IncidentDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 _advanced_lock = threading.Lock()
 _incident_lock = threading.Lock()
+
+# Heavy helmet/plate/road/incident analysis must never block the primary
+# vehicle-tracking loop. Keep only the newest pending frame per camera.
+_analysis_task_lock = threading.Lock()
+_analysis_task_condition = threading.Condition(_analysis_task_lock)
+_advanced_latest_tasks = {}
+_incident_latest_tasks = {}
+_analysis_workers_started = False
+
 _analytics_lock = threading.Lock()
 _analytics_last_error = None
 _analytics_last_attempt = 0.0
@@ -168,9 +177,109 @@ base.advanced_model_readiness = _safe_runtime_readiness
 _original_annotate = base._annotate_tracking
 
 
+def _put_latest_task(target, task):
+    camera_key = task["camera"]["camera_key"]
+    with _analysis_task_condition:
+        target[camera_key] = task
+        _analysis_task_condition.notify_all()
+
+
+def _pop_latest_task(target):
+    with _analysis_task_condition:
+        while not target:
+            _analysis_task_condition.wait(timeout=0.5)
+        # Prefer the oldest camera waiting, while still storing only its newest
+        # frame. This bounds memory and prevents a busy camera from starving
+        # every other camera.
+        camera_key, task = min(
+            target.items(),
+            key=lambda item: item[1]["queued_at"],
+        )
+        target.pop(camera_key, None)
+        return task
+
+
+def _advanced_analysis_loop():
+    while True:
+        task = _pop_latest_task(_advanced_latest_tasks)
+        camera = task["camera"]
+        try:
+            store = _ensure_analytics_store()
+            if store is not None:
+                advanced.store = store
+            with _advanced_lock:
+                summary = advanced.process(
+                    camera,
+                    task["frame"],
+                    task["result"],
+                    task["model"],
+                    task["processed_index"],
+                    draw_frame=None,
+                )
+            base.set_ai_status(camera["camera_key"], advanced=summary)
+        except Exception as exc:
+            log.exception(
+                "Async advanced detection failed camera=%s: %s",
+                camera["camera_key"],
+                exc,
+            )
+            base.set_ai_status(
+                camera["camera_key"],
+                advanced={"error": str(exc)},
+            )
+
+
+def _incident_analysis_loop():
+    while True:
+        task = _pop_latest_task(_incident_latest_tasks)
+        camera = task["camera"]
+        try:
+            store = _ensure_analytics_store()
+            incidents.store = store
+            with _incident_lock:
+                summary = incidents.process(
+                    camera,
+                    task["frame"],
+                    task["result"],
+                    task["processed_index"],
+                    draw_frame=None,
+                )
+            base.set_ai_status(camera["camera_key"], incidents=summary)
+        except Exception as exc:
+            log.exception(
+                "Async incident detection failed camera=%s: %s",
+                camera["camera_key"],
+                exc,
+            )
+            base.set_ai_status(
+                camera["camera_key"],
+                incidents={"error": str(exc)},
+            )
+
+
+def _start_analysis_workers():
+    global _analysis_workers_started
+    if _analysis_workers_started:
+        return
+    _analysis_workers_started = True
+    threading.Thread(
+        target=_advanced_analysis_loop,
+        daemon=True,
+        name="advanced-analysis",
+    ).start()
+    threading.Thread(
+        target=_incident_analysis_loop,
+        daemon=True,
+        name="incident-analysis",
+    ).start()
+    log.info("Non-blocking advanced/incident analysis workers started")
+
+
 def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
                             processed_index, inference_ms, count_state):
-    clean_frame = frame.copy()
+    # Primary person/vehicle tracking and counting completes immediately.
+    # Expensive helmet/plate/road/incident models run asynchronously on the
+    # newest available frame and therefore cannot freeze live vehicle boxes.
     persons, vehicles, class_counts = _original_annotate(
         camera,
         frame,
@@ -182,44 +291,37 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
         inference_ms,
         count_state,
     )
-    try:
-        store = _ensure_analytics_store()
-        if store is not None:
-            advanced.store = store
-        with _advanced_lock:
-            summary = advanced.process(
-                camera,
-                clean_frame,
-                result,
-                model,
-                processed_index,
-                draw_frame=frame,
-            )
-        incident_summary = {}
-        try:
-            incidents.store = store
-            with _incident_lock:
-                incident_summary = incidents.process(
-                    camera,
-                    clean_frame,
-                    result,
-                    processed_index,
-                    draw_frame=frame,
-                )
-        except Exception as incident_exc:
-            log.exception(
-                "Incident detection failed camera=%s: %s",
-                camera["camera_key"], incident_exc,
-            )
-            incident_summary = {"error": str(incident_exc)}
-        base.set_ai_status(
-            camera["camera_key"],
-            advanced=summary,
-            incidents=incident_summary,
+
+    now = time.time()
+    base_task = {
+        "camera": camera,
+        "result": result,
+        "model": model,
+        "processed_index": processed_index,
+        "queued_at": now,
+    }
+
+    run_advanced = (
+        Config.ADVANCED_DETECTION_ENABLED
+        and (
+            processed_index % Config.ADVANCED_EVERY_N_FRAMES == 0
+            or processed_index % Config.ROAD_EVERY_N_FRAMES == 0
         )
-    except Exception as exc:
-        log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
-        base.set_ai_status(camera["camera_key"], advanced={"error": str(exc)})
+    )
+    if run_advanced:
+        advanced_task = dict(base_task)
+        advanced_task["frame"] = frame.copy()
+        _put_latest_task(_advanced_latest_tasks, advanced_task)
+
+    run_incident = (
+        Config.INCIDENT_DETECTION_ENABLED
+        and processed_index % Config.INCIDENT_EVERY_N_FRAMES == 0
+    )
+    if run_incident:
+        incident_task = dict(base_task)
+        incident_task["frame"] = frame.copy()
+        _put_latest_task(_incident_latest_tasks, incident_task)
+
     return persons, vehicles, class_counts
 
 
@@ -411,6 +513,7 @@ def advanced_status():
 
 if __name__ == "__main__":
     cameras = Config.CAMERAS
+    _start_analysis_workers()
 
     # RTSP capture remains active for every configured camera when
     # MONITOR_ALL_CAMERAS=1. UI pagination no longer stops monitoring.

@@ -753,10 +753,13 @@
         if (ai.last_error) aiErrors++;
 
         let state = st.connected ? (mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING') : 'OFFLINE';
-        if (mode === 'ai' && aiLive) state = 'AI LIVE';
+        if (mode === 'ai' && rawLive && aiLive) state = 'AI LIVE';
         if (mode === 'raw' && rawLive) state = 'RAW LIVE';
-        if (mode === 'ai' && ai.last_error) state = 'AI ERROR';
-        if (!st.connected && st.last_error) state = 'OFFLINE';
+        if (mode === 'ai' && rawLive && ai.last_error) state = 'AI ERROR';
+        if (!rawLive) {
+          state = 'OFFLINE';
+          clearCameraOverlay(number);
+        }
         setCameraState(number, selectedLive, state);
         setText(`vehicleCount${number}`, fmt(ai.vehicles));
         setText(`personCount${number}`, fmt(ai.persons));
