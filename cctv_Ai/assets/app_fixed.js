@@ -240,6 +240,8 @@
         applyCameraPage();
       }
     });
+    updateCameraPickerLabel();
+    applyPickerSearch();
     applyCameraPage();
   }
 
