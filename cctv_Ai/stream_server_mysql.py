@@ -421,6 +421,8 @@ if __name__ == "__main__":
             daemon=True,
             name=f"capture-{cam['camera_key']}",
         ).start()
+        if Config.CAMERA_CONNECT_STAGGER_SECONDS:
+            time.sleep(Config.CAMERA_CONNECT_STAGGER_SECONDS)
 
     if Config.MONITOR_ALL_CAMERAS:
         worker_count = min(Config.SHARED_AI_WORKERS, max(1, len(cameras)))
