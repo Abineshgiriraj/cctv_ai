@@ -484,12 +484,17 @@ def _box_iou(a, b):
 
 
 class _SimpleCameraTracker:
-    """Lightweight per-camera tracker for shared-model monitoring.
+    """Per-camera motion tracker used by shared YOLO workers.
 
-    It preserves local track IDs using class + IoU/center matching. This lets one
-    shared YOLO model monitor many feeds without ByteTrack state leaking from one
-    camera into another.
+    The previous matcher required an exact class match and mostly compared the
+    latest box. On busy junctions that made IDs jump whenever YOLO briefly
+    changed car/truck/bus classification or when the next inference arrived a
+    second later. This tracker predicts each track forward, allows compatible
+    road-vehicle classes to match, keeps a class vote per track and smooths the
+    box/velocity before emitting the next result.
     """
+
+    VEHICLE_FAMILY = {1, 2, 3, 5, 7}
 
     def __init__(self):
         self.next_id = 1
@@ -505,6 +510,44 @@ class _SimpleCameraTracker:
     def _diag(box):
         x1, y1, x2, y2 = box
         return max(1.0, ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+
+    @staticmethod
+    def _area(box):
+        x1, y1, x2, y2 = box
+        return max(1.0, (x2 - x1) * (y2 - y1))
+
+    @classmethod
+    def _compatible_class(cls, previous, current):
+        if previous == current:
+            return True
+        return previous in cls.VEHICLE_FAMILY and current in cls.VEHICLE_FAMILY
+
+    @staticmethod
+    def _shift_box(box, dx, dy):
+        return [
+            box[0] + dx,
+            box[1] + dy,
+            box[2] + dx,
+            box[3] + dy,
+        ]
+
+    @staticmethod
+    def _blend_box(previous, current, current_weight=0.72):
+        old_weight = 1.0 - current_weight
+        return [
+            old_weight * previous[i] + current_weight * current[i]
+            for i in range(4)
+        ]
+
+    def _predict_box(self, track, age):
+        vx, vy = track.get("velocity", (0.0, 0.0))
+        return self._shift_box(track["box"], vx * age, vy * age)
+
+    def _stable_class(self, track):
+        votes = track.get("class_votes") or {}
+        if not votes:
+            return int(track["cls_id"])
+        return int(max(votes.items(), key=lambda item: item[1])[0])
 
     def update(self, result):
         self.frame_index += 1
@@ -527,49 +570,128 @@ class _SimpleCameraTracker:
         assigned_tracks = set()
         tracked_boxes = []
 
-        for detection in sorted(detections, key=lambda row: row["confidence"], reverse=True):
+        # High-confidence observations claim a track first.
+        for detection in sorted(
+            detections,
+            key=lambda row: row["confidence"],
+            reverse=True,
+        ):
             cls_id = detection["cls_id"]
             box = detection["box"]
             center = self._center(box)
+            area = self._area(box)
             best = None
 
             for track_id, track in self.tracks.items():
-                if track_id in assigned_tracks or track["cls_id"] != cls_id:
-                    continue
-                if self.frame_index - track["last_seen"] > 8:
+                if track_id in assigned_tracks:
                     continue
 
-                iou = _box_iou(box, track["box"])
-                old_center = self._center(track["box"])
-                distance = ((center[0] - old_center[0]) ** 2 + (center[1] - old_center[1]) ** 2) ** 0.5
-                distance_limit = max(self._diag(box), self._diag(track["box"])) * 1.25
-                if iou < 0.05 and distance > distance_limit:
+                age = self.frame_index - track["last_seen"]
+                if age > 12:
+                    continue
+                if not self._compatible_class(track["cls_id"], cls_id):
                     continue
 
-                score = iou * 2.0 - (distance / max(1.0, distance_limit))
+                predicted = self._predict_box(track, age)
+                predicted_center = self._center(predicted)
+                predicted_area = self._area(predicted)
+                iou = _box_iou(box, predicted)
+
+                distance = (
+                    (center[0] - predicted_center[0]) ** 2
+                    + (center[1] - predicted_center[1]) ** 2
+                ) ** 0.5
+                distance_limit = max(
+                    self._diag(box),
+                    self._diag(predicted),
+                    24.0,
+                ) * 1.45
+                norm_distance = distance / max(1.0, distance_limit)
+                size_ratio = min(area, predicted_area) / max(area, predicted_area)
+
+                # Reject implausible jumps. A low-IoU match is still allowed when
+                # the predicted center and object size remain plausible.
+                if iou < 0.01 and norm_distance > 1.0:
+                    continue
+                if size_ratio < 0.20 and iou < 0.08:
+                    continue
+
+                class_penalty = 0.0 if track["cls_id"] == cls_id else 0.12
+                score = (
+                    iou * 2.40
+                    + max(0.0, 1.0 - norm_distance) * 1.35
+                    + size_ratio * 0.45
+                    - class_penalty
+                    - age * 0.02
+                )
                 if best is None or score > best[0]:
-                    best = (score, track_id)
+                    best = (score, track_id, predicted)
 
-            if best is None:
+            if best is None or best[0] < 0.25:
                 track_id = self.next_id
                 self.next_id += 1
+                class_votes = defaultdict(float)
+                class_votes[cls_id] += max(0.05, detection["confidence"])
+                self.tracks[track_id] = {
+                    "cls_id": cls_id,
+                    "box": box,
+                    "last_seen": self.frame_index,
+                    "velocity": (0.0, 0.0),
+                    "confidence": detection["confidence"],
+                    "class_votes": class_votes,
+                }
             else:
-                track_id = best[1]
+                _score, track_id, predicted = best
+                track = self.tracks[track_id]
+                age = max(1, self.frame_index - track["last_seen"])
+                previous_center = self._center(track["box"])
+                observed_dx = (center[0] - previous_center[0]) / age
+                observed_dy = (center[1] - previous_center[1]) / age
+                old_vx, old_vy = track.get("velocity", (0.0, 0.0))
+                velocity = (
+                    old_vx * 0.55 + observed_dx * 0.45,
+                    old_vy * 0.55 + observed_dy * 0.45,
+                )
+
+                smoothed_box = self._blend_box(predicted, box, 0.78)
+                class_votes = track.get("class_votes")
+                if class_votes is None:
+                    class_votes = defaultdict(float)
+                # Slowly decay old class evidence so a genuinely changed/stable
+                # classification can eventually win without flickering each frame.
+                for vote_cls in list(class_votes):
+                    class_votes[vote_cls] *= 0.96
+                class_votes[cls_id] += max(0.05, detection["confidence"])
+
+                track.update({
+                    "box": smoothed_box,
+                    "last_seen": self.frame_index,
+                    "velocity": velocity,
+                    "confidence": (
+                        float(track.get("confidence", detection["confidence"])) * 0.45
+                        + detection["confidence"] * 0.55
+                    ),
+                    "class_votes": class_votes,
+                })
+                track["cls_id"] = self._stable_class(track)
 
             assigned_tracks.add(track_id)
-            self.tracks[track_id] = {
-                "cls_id": cls_id,
-                "box": box,
-                "last_seen": self.frame_index,
-            }
+            track = self.tracks[track_id]
+            stable_cls = self._stable_class(track)
+            track["cls_id"] = stable_cls
             tracked_boxes.append(
-                _TrackedBox(cls_id, detection["confidence"], box, track_id)
+                _TrackedBox(
+                    stable_cls,
+                    float(track.get("confidence", detection["confidence"])),
+                    track["box"],
+                    track_id,
+                )
             )
 
         stale = [
             track_id
             for track_id, track in self.tracks.items()
-            if self.frame_index - track["last_seen"] > 12
+            if self.frame_index - track["last_seen"] > 20
         ]
         for track_id in stale:
             self.tracks.pop(track_id, None)
