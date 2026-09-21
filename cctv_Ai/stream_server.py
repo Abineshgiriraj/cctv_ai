@@ -803,6 +803,9 @@ def shared_ai_worker(worker_id: int, cameras, background_only: bool = False):
             foreground_turns = 0
 
         if not ordered_cameras:
+            if background_only:
+                time.sleep(0.02)
+                continue
             ordered_cameras = cameras[:1]
 
         for camera in ordered_cameras:
