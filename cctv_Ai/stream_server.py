@@ -1006,8 +1006,10 @@ def active_cameras_api():
     return jsonify({
         "ok": True,
         "paged_mode": Config.PAGED_CAMERA_MODE,
+        "monitor_all_cameras": Config.MONITOR_ALL_CAMERAS,
         "limit": Config.ACTIVE_CAMERA_LIMIT,
         "active_camera_keys": active,
+        "monitored_total": len(allowed_keys()) if Config.MONITOR_ALL_CAMERAS else len(active),
         "configured_total": len(allowed_keys()),
     })
 
@@ -1024,7 +1026,8 @@ def health():
             ai_last = ai.get("last_processed_at")
             cameras[key] = {
                 "connected": bool(st.get("connected")),
-                "active": is_camera_active(key),
+                "active": is_camera_focused(key),
+                "monitored": is_camera_active(key),
                 "standby": bool(st.get("standby")),
                 "frames": int(st.get("frames") or 0),
                 "last_jpeg_bytes": int(st.get("last_jpeg_bytes") or 0),
@@ -1067,6 +1070,9 @@ def health():
         "ok": live,
         "ai_ok": ai_live,
         "paged_mode": Config.PAGED_CAMERA_MODE,
+        "monitor_all_cameras": Config.MONITOR_ALL_CAMERAS,
+        "monitored_total": len(allowed_keys()) if Config.MONITOR_ALL_CAMERAS else len(active_list),
+        "shared_ai_workers": Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
         "active_camera_keys": active_list,
         "active_camera_limit": Config.ACTIVE_CAMERA_LIMIT,
         "configured_total": len(allowed_keys()),
@@ -1190,22 +1196,42 @@ def tracked_feed(camera_key):
 if __name__ == "__main__":
     cameras = Config.CAMERAS
 
-    # Start the original capture threads first.
     for cam in cameras:
         camera_key = cam["camera_key"]
-        t = threading.Thread(target=capture_stream, args=(cam,), daemon=True, name=f"capture-{camera_key}")
-        t.start()
+        threading.Thread(
+            target=capture_stream,
+            args=(cam,),
+            daemon=True,
+            name=f"capture-{camera_key}",
+        ).start()
 
-    # AI workers consume latest_cv_frames from those capture threads. There is one
-    # tracker/model instance per camera so ByteTrack IDs cannot leak across feeds.
-    for cam in cameras:
-        camera_key = cam["camera_key"]
-        t = threading.Thread(target=ai_tracking_worker, args=(cam,), daemon=True, name=f"ai-{camera_key}")
-        t.start()
+    if Config.MONITOR_ALL_CAMERAS:
+        worker_count = min(Config.SHARED_AI_WORKERS, max(1, len(cameras)))
+        partitions = [cameras[index::worker_count] for index in range(worker_count)]
+        for worker_id, partition in enumerate(partitions, start=1):
+            if not partition:
+                continue
+            threading.Thread(
+                target=shared_ai_worker,
+                args=(worker_id, partition),
+                daemon=True,
+                name=f"shared-ai-{worker_id}",
+            ).start()
+    else:
+        for cam in cameras:
+            camera_key = cam["camera_key"]
+            threading.Thread(
+                target=ai_tracking_worker,
+                args=(cam,),
+                daemon=True,
+                name=f"ai-{camera_key}",
+            ).start()
 
     log.info(
-        "Starting MJPEG + YOLO/ByteTrack server on 0.0.0.0:5000 cameras=%s ai_fps=%s counting=%s line=%.2f",
-        cameras,
+        "Starting MJPEG AI server cameras=%s monitor_all=%s shared_workers=%s ai_fps=%s counting=%s line=%.2f",
+        len(cameras),
+        Config.MONITOR_ALL_CAMERAS,
+        Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
         Config.AI_MAX_FPS,
         Config.COUNTING_ENABLED,
         Config.COUNT_LINE_Y_RATIO,
