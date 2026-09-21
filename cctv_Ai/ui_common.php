@@ -73,6 +73,24 @@ if ($config_str !== '') {
     }
 }
 
+$title_cache_path = __DIR__ . DIRECTORY_SEPARATOR . 'data' . DIRECTORY_SEPARATOR . 'nvr_channel_titles.json';
+if (is_readable($title_cache_path)) {
+    $decoded = json_decode((string)file_get_contents($title_cache_path), true);
+    if (is_array($decoded)) {
+        foreach ($cameras as &$camera) {
+            $cached = $decoded[$camera['camera_key']] ?? null;
+            if (!is_array($cached)) continue;
+            $title = trim((string)($cached['camera_name'] ?? ''));
+            if ($title === '') continue;
+            $camera['name'] = $title;
+            if ($camera['area'] === '' || stripos($camera['area'], 'Recorder ') === 0) {
+                $camera['area'] = trim((string)($cached['area_name'] ?? $title)) ?: $title;
+            }
+        }
+        unset($camera);
+    }
+}
+
 function e(string $value): string { return htmlspecialchars($value, ENT_QUOTES, 'UTF-8'); }
 
 function render_page_start(string $active, string $title, string $subtitle = ''): void {
