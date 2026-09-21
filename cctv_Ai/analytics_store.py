@@ -153,6 +153,23 @@ class TrafficStore:
                 KEY idx_road_event_captured (captured_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
+            """
+            CREATE TABLE IF NOT EXISTS incident_events (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                session_id VARCHAR(32) NOT NULL,
+                camera_ip VARCHAR(128) NOT NULL,
+                incident_type VARCHAR(64) NOT NULL,
+                severity VARCHAR(16) NOT NULL DEFAULT 'Medium',
+                confidence DECIMAL(6,5) NOT NULL DEFAULT 0,
+                captured_at DATETIME NOT NULL,
+                event_date DATE NOT NULL,
+                evidence_image LONGBLOB NULL,
+                metadata_json JSON NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_incident_date (event_date, camera_ip, incident_type),
+                KEY idx_incident_captured (captured_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
         ]
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -160,7 +177,7 @@ class TrafficStore:
                     cur.execute(sql)
                 # Older schemas used VARCHAR(45), which is too short for some
                 # descriptive camera keys. Expanding is safe and preserves data.
-                for table in ("vehicle_events", "daily_vehicle_counts", "violations", "road_events"):
+                for table in ("vehicle_events", "daily_vehicle_counts", "violations", "road_events", "incident_events"):
                     try:
                         cur.execute(f"ALTER TABLE {table} MODIFY camera_ip VARCHAR(128) NOT NULL")
                     except Exception:
@@ -475,3 +492,101 @@ class TrafficStore:
             with open(image, "rb") as handle:
                 return handle.read()
         return None
+
+    def record_incident(self, *, session_id, incident_type, severity="Medium",
+                        confidence=0, evidence_image=None, metadata=None,
+                        camera=None, camera_ip=None):
+        camera_key = self._camera_key(camera, camera_ip)
+        if not camera_key:
+            raise ValueError("camera key is required")
+        evidence_image = self._save_image_to_disk("incident", evidence_image)
+        merged_metadata = dict(metadata or {})
+        merged_metadata.update({
+            k: v for k, v in self._camera_metadata(camera).items()
+            if v is not None
+        })
+        now = datetime.now()
+        sql = """
+            INSERT INTO incident_events
+            (session_id, camera_ip, incident_type, severity, confidence,
+             captured_at, event_date, evidence_image, metadata_json)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (
+                    session_id, camera_key, incident_type, severity,
+                    float(confidence or 0), now, now.date(), evidence_image,
+                    json.dumps(merged_metadata, ensure_ascii=False),
+                ))
+                row_id = cur.lastrowid
+            conn.commit()
+            return row_id
+
+    def recent_incidents(self, *, limit=100, from_date=None, to_date=None,
+                         camera_key=None, incident_type=None):
+        limit = max(1, min(int(limit), 500))
+        today = datetime.now().date().isoformat()
+        from_date = from_date or today
+        to_date = to_date or from_date
+        where = ["event_date BETWEEN %s AND %s"]
+        params = [from_date, to_date]
+        if camera_key:
+            where.append("camera_ip=%s")
+            params.append(camera_key)
+        if incident_type:
+            where.append("incident_type=%s")
+            params.append(incident_type)
+        params.append(limit)
+        sql = f"""
+            SELECT id, camera_ip AS camera_key, incident_type, severity,
+                   confidence, captured_at, event_date, metadata_json
+            FROM incident_events
+            WHERE {' AND '.join(where)}
+            ORDER BY captured_at DESC
+            LIMIT %s
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        for row in rows:
+            if row.get("captured_at"):
+                row["captured_at"] = row["captured_at"].isoformat(
+                    sep=" ", timespec="seconds"
+                )
+            metadata = row.get("metadata_json")
+            if isinstance(metadata, str):
+                try:
+                    row["metadata"] = json.loads(metadata)
+                except Exception:
+                    row["metadata"] = {}
+            else:
+                row["metadata"] = metadata or {}
+            row.pop("metadata_json", None)
+            row["confidence"] = float(row.get("confidence") or 0)
+        return rows
+
+    def incident_image(self, incident_id):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT evidence_image FROM incident_events WHERE id=%s",
+                    (int(incident_id),),
+                )
+                row = cur.fetchone()
+        if not row or not row.get("evidence_image"):
+            return None
+        image = row["evidence_image"]
+        if isinstance(image, bytes) and image.startswith(b"\xff\xd8\xff"):
+            return image
+        if isinstance(image, bytes):
+            try:
+                image = image.decode("utf-8")
+            except Exception:
+                return None
+        if isinstance(image, str) and os.path.isfile(image):
+            with open(image, "rb") as handle:
+                return handle.read()
+        return None
+
