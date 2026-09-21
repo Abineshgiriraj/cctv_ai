@@ -85,6 +85,12 @@ class Config:
     CAMERA_USERNAME = os.getenv("CAMERA_USERNAME", "admin")
     CAMERA_PASSWORD = os.getenv("CAMERA_PASSWORD", "")
     CAMERA_SUBTYPE = int(os.getenv("CAMERA_SUBTYPE", 0))
+    CAMERA_CONNECT_STAGGER_SECONDS = max(
+        0.0, float(os.getenv("CAMERA_CONNECT_STAGGER_SECONDS", 0.15))
+    )
+    RTSP_RECONNECT_SECONDS = max(
+        1.0, float(os.getenv("RTSP_RECONNECT_SECONDS", 3.0))
+    )
 
     YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
 
