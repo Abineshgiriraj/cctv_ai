@@ -44,7 +44,10 @@ def _credentials():
 def _digest_get(url, username, password, timeout=6):
     manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     manager.add_password(None, url, username, password)
-    opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(manager))
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPDigestAuthHandler(manager),
+        urllib.request.HTTPBasicAuthHandler(manager),
+    )
     request = urllib.request.Request(url, headers={"User-Agent": "CivicVision/1.0"})
     with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
