@@ -33,12 +33,17 @@
   async function syncBackendFocus(keys) {
     if (!q('#cameraPagination')) return;
     try {
-      await fetch(`${baseUrl}/system/active_cameras`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        cache: 'no-store',
-        body: JSON.stringify({camera_keys: keys})
+      const params = new URLSearchParams({
+        keys: keys.join(','),
+        t: String(Date.now())
       });
+      const response = await fetch(`${baseUrl}/system/active_cameras?${params.toString()}`, {
+        method: 'GET',
+        cache: 'no-store'
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (!data.ok) throw new Error(data.error || 'Camera activation failed');
     } catch (err) {
       console.warn('Unable to update active camera page', err);
     }
