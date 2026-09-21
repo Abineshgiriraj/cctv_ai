@@ -12,6 +12,7 @@
   let cameraHealthFilter = '';
   const selectedCameraKeys = new Set();
   let latestHealthData = null;
+  let latestCountLineRatio = 0.62;
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
   const fmt = (value) => Number(value || 0).toLocaleString('en-IN');
@@ -115,11 +116,137 @@
     }
   }
 
+  function displayStreamUrl(img) {
+    // AI mode uses the smooth raw MJPEG as the video layer. Detection boxes are
+    // drawn separately on a browser canvas, so video playback is not tied to
+    // slow YOLO inference frames.
+    return img?.dataset.rawStreamUrl || '';
+  }
+
+  function clearCameraOverlay(number) {
+    const canvas = q(`#cameraOverlay${number}`);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function drawCameraOverlay(number, payload) {
+    const canvas = q(`#cameraOverlay${number}`);
+    const img = q(`#cameraStream${number}`);
+    if (!canvas || !img) return;
+
+    const mode = img.dataset.streamMode || 'ai';
+    if (mode !== 'ai') {
+      canvas.classList.add('hidden');
+      clearCameraOverlay(number);
+      return;
+    }
+
+    canvas.classList.remove('hidden');
+    const host = canvas.parentElement;
+    const width = host?.clientWidth || 0;
+    const height = host?.clientHeight || 0;
+    const sourceWidth = Number(payload?.source_width || 0);
+    const sourceHeight = Number(payload?.source_height || 0);
+    if (!width || !height || !sourceWidth || !sourceHeight) {
+      clearCameraOverlay(number);
+      return;
+    }
+
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const targetWidth = Math.max(1, Math.round(width * dpr));
+    const targetHeight = Math.max(1, Math.round(height * dpr));
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const scale = Math.min(width / sourceWidth, height / sourceHeight);
+    const drawWidth = sourceWidth * scale;
+    const drawHeight = sourceHeight * scale;
+    const offsetX = (width - drawWidth) / 2;
+    const offsetY = (height - drawHeight) / 2;
+    const age = Number(payload?.age_seconds);
+    const stale = Number.isFinite(age) && age > 8;
+
+    // Do not keep very old boxes on a moving live image.
+    if (stale) return;
+
+    const colors = {
+      person: '#34d399',
+      bicycle: '#facc15',
+      car: '#38bdf8',
+      motorcycle: '#c084fc',
+      bus: '#fb923c',
+      truck: '#f472b6'
+    };
+
+    const lineY = offsetY + sourceHeight * latestCountLineRatio * scale;
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(offsetX, lineY);
+    ctx.lineTo(offsetX + drawWidth, lineY);
+    ctx.stroke();
+    ctx.font = '700 11px Manrope, sans-serif';
+    ctx.fillStyle = '#facc15';
+    ctx.fillText('COUNTING LINE', offsetX + 8, Math.max(offsetY + 14, lineY - 7));
+
+    (payload?.detections || []).forEach(det => {
+      const box = Array.isArray(det.box) ? det.box : [];
+      if (box.length !== 4) return;
+      const x = offsetX + Number(box[0]) * scale;
+      const y = offsetY + Number(box[1]) * scale;
+      const w = Math.max(1, (Number(box[2]) - Number(box[0])) * scale);
+      const h = Math.max(1, (Number(box[3]) - Number(box[1])) * scale);
+      const label = String(det.label || 'object').toLowerCase();
+      const color = colors[label] || '#2cdfef';
+      const track = det.track_id === null || det.track_id === undefined ? '' : ` #${det.track_id}`;
+      const confidence = Math.round(Number(det.confidence || 0) * 100);
+      const text = `${label.toUpperCase()}${track} ${confidence}%`;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+
+      ctx.font = '700 11px Manrope, sans-serif';
+      const textWidth = ctx.measureText(text).width + 10;
+      const labelY = Math.max(offsetY, y - 20);
+      ctx.fillStyle = 'rgba(2, 8, 14, .82)';
+      ctx.fillRect(x, labelY, textWidth, 18);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x + 5, labelY + 13);
+    });
+  }
+
+  async function refreshVisibleDetections() {
+    if (!q('#cameraPagination') || !visibleCameraKeys.length) return;
+    try {
+      const params = new URLSearchParams({
+        keys: visibleCameraKeys.join(','),
+        t: String(Date.now())
+      });
+      const response = await fetch(`${baseUrl}/live/detections?${params.toString()}`, {
+        cache: 'no-store'
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!data.ok) return;
+      visibleCameraKeys.forEach(key => {
+        const number = cameras.findIndex(cam => cam.camera_key === key) + 1;
+        if (number > 0) drawCameraOverlay(number, data.cameras?.[key] || {});
+      });
+    } catch (_) {}
+  }
+
   function loadVisibleStream(number) {
     const img = q(`#cameraStream${number}`);
     if (!img) return;
-    const mode = img.dataset.streamMode || 'ai';
-    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    const url = displayStreamUrl(img);
     if (!url) return;
     const wanted = `${url}?page=${livePage}&t=${Date.now()}`;
     if (!img.getAttribute('src')) img.src = wanted;
@@ -129,6 +256,7 @@
     const img = q(`#cameraStream${number}`);
     if (!img) return;
     img.removeAttribute('src');
+    clearCameraOverlay(number);
   }
 
   function applyCameraPage() {
@@ -369,7 +497,7 @@
     const image = q('#cameraFocusImage', modal);
     const loading = q('#cameraFocusLoading', modal);
     const mode = source.dataset.streamMode || 'ai';
-    const url = mode === 'ai' ? source.dataset.aiStreamUrl : source.dataset.rawStreamUrl;
+    const url = displayStreamUrl(source);
     if (!url) return;
 
     setText('cameraFocusTitle', cam.name || `Camera ${number}`);
@@ -458,6 +586,7 @@
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       latestHealthData = data;
+      latestCountLineRatio = Number(data?.traffic?.count_line_y_ratio || 0.62);
       updatePickerHealth();
 
       const healthRows = cameras.map(cam => data?.cameras?.[cam.camera_key] || {});
@@ -486,10 +615,16 @@
         const st = data?.cameras?.[key] || {};
         const ai = st?.ai || {};
         const rawLive = !!(st.connected && st.has_frame);
-        const aiLive = !!(ai.model_loaded && ai.has_frame && !ai.last_error);
+        const aiAge = Number(ai.age_seconds);
+        const aiLive = !!(
+          ai.model_loaded
+          && Number.isFinite(aiAge)
+          && aiAge <= 15
+          && !ai.last_error
+        );
         const img = q(`#cameraStream${number}`);
         const mode = img?.dataset.streamMode || 'ai';
-        const selectedLive = mode === 'ai' ? aiLive : rawLive;
+        const selectedLive = rawLive;
         const active = activeSet.has(key);
 
         if (!active) {
@@ -541,17 +676,19 @@
     img.dataset.streamMode = mode;
     q(`#aiMode${number}`)?.classList.toggle('active', mode === 'ai');
     q(`#rawMode${number}`)?.classList.toggle('active', mode === 'raw');
-    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    const url = displayStreamUrl(img);
     if (!url) return;
-    setCameraState(number, false, mode === 'ai' ? 'AI STARTING' : 'RAW CONNECTING');
+    q(`#cameraOverlay${number}`)?.classList.toggle('hidden', mode !== 'ai');
+    if (mode !== 'ai') clearCameraOverlay(number);
+    setCameraState(number, false, mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING');
     img.src = `${url}?t=${Date.now()}`;
+    if (mode === 'ai') refreshVisibleDetections();
   };
 
   window.reconnectCamera = (number) => {
     const img = q(`#cameraStream${number}`);
     if (!img) return;
-    const mode = img.dataset.streamMode || 'ai';
-    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    const url = displayStreamUrl(img);
     if (!url) return;
     setCameraState(number, false, 'RECONNECTING');
     img.src = `${url}?reconnect=${Date.now()}`;
@@ -766,11 +903,13 @@
 
   initLivePagination();
   refreshHealth();
+  refreshVisibleDetections();
   refreshTodaySummary();
   fetchReportData();
   fetchViolations();
   refreshHelmetModelStatus();
   setInterval(refreshHealth, 3000);
+  setInterval(refreshVisibleDetections, 700);
   setInterval(refreshTodaySummary, 5000);
   setInterval(fetchReportData, 5000);
   setInterval(fetchViolations, 5000);

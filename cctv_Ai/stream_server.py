@@ -599,7 +599,10 @@ def shared_ai_worker(worker_id: int, cameras):
         [camera["camera_key"] for camera in cameras],
     )
 
-    min_interval = 1.0 / max(Config.AI_MAX_FPS, 0.05)
+    foreground_interval = 1.0 / max(Config.FOREGROUND_AI_FPS, 0.10)
+    background_interval = 1.0 / max(Config.BACKGROUND_AI_FPS, 0.02)
+    focus_cursor = 0
+    background_cursor = 0
     states = {}
     for camera in cameras:
         key = camera["camera_key"]
@@ -625,13 +628,41 @@ def shared_ai_worker(worker_id: int, cameras):
 
     while True:
         did_work = False
-        ordered_cameras = sorted(
-            cameras,
-            key=lambda camera: 0 if is_camera_focused(camera["camera_key"]) else 1,
-        )
+
+        focused = [
+            camera for camera in cameras
+            if is_camera_focused(camera["camera_key"])
+        ]
+        background = [
+            camera for camera in cameras
+            if not is_camera_focused(camera["camera_key"])
+        ]
+
+        # Do not process the whole 49-camera partition before returning to the
+        # visible feeds. Take one foreground camera, then a small number of
+        # background cameras. This keeps the displayed video responsive while
+        # still rotating continuously through all configured cameras.
+        ordered_cameras = []
+        if focused:
+            ordered_cameras.append(focused[focus_cursor % len(focused)])
+            focus_cursor += 1
+
+        if background:
+            take = min(Config.BACKGROUND_CAMERAS_PER_CYCLE, len(background))
+            for _ in range(take):
+                ordered_cameras.append(
+                    background[background_cursor % len(background)]
+                )
+                background_cursor += 1
+
+        if not ordered_cameras:
+            ordered_cameras = cameras[:1]
+
         for camera in ordered_cameras:
             camera_key = camera["camera_key"]
             state = states[camera_key]
+            focused_now = is_camera_focused(camera_key)
+            min_interval = foreground_interval if focused_now else background_interval
 
             with lock:
                 frame = latest_cv_frames.get(camera_key)
@@ -738,6 +769,7 @@ def _annotate_tracking(camera, frame, result, model, history, last_seen,
     persons = 0
     vehicles = 0
     class_counts = defaultdict(int)
+    detection_rows = []
 
     # BGR colors chosen to remain visible on common road scenes.
     class_colors = {
@@ -785,6 +817,14 @@ def _annotate_tracking(camera, frame, result, model, history, last_seen,
             elif cls_id in Config.VEHICLE_CLASSES:
                 vehicles += 1
 
+            detection_rows.append({
+                "class_id": cls_id,
+                "label": normalized_name,
+                "confidence": round(conf, 4),
+                "track_id": track_id,
+                "box": [x1, y1, x2, y2],
+            })
+
             color = class_colors.get(cls_id, (44, 223, 255))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             id_text = f" #{track_id}" if track_id is not None else ""
@@ -820,6 +860,13 @@ def _annotate_tracking(camera, frame, result, model, history, last_seen,
         count_state["track_age"].pop(track_id, None)
 
     _draw_summary(frame, persons, vehicles, inference_ms, count_state["session_total"])
+    set_ai_status(
+        camera["camera_key"],
+        detections=detection_rows,
+        source_width=int(frame.shape[1]),
+        source_height=int(frame.shape[0]),
+        detections_at=time.time(),
+    )
     return persons, vehicles, dict(class_counts)
 
 
@@ -1036,6 +1083,33 @@ def active_cameras_api():
         "monitored_total": len(allowed_keys()) if Config.MONITOR_ALL_CAMERAS else len(active),
         "configured_total": len(allowed_keys()),
     })
+
+
+@app.route("/live/detections")
+def live_detections():
+    requested = (request.args.get("keys") or "").strip()
+    keys = [key for key in requested.split(",") if key] if requested else []
+    if not keys:
+        _ensure_initial_focus()
+        with lock:
+            keys = list(active_camera_keys)
+    allowed = set(allowed_keys())
+    keys = [key for key in keys if key in allowed][:16]
+    now = time.time()
+    payload = {}
+    with lock:
+        for key in keys:
+            row = dict(ai_status.get(key) or default_ai_row())
+            detected_at = row.get("detections_at")
+            payload[key] = {
+                "detections": row.get("detections") or [],
+                "source_width": int(row.get("source_width") or 0),
+                "source_height": int(row.get("source_height") or 0),
+                "age_seconds": None if detected_at is None else round(now - detected_at, 2),
+                "last_inference_ms": row.get("last_inference_ms"),
+                "last_error": row.get("last_error"),
+            }
+    return jsonify({"ok": True, "cameras": payload})
 
 
 @app.route("/health")

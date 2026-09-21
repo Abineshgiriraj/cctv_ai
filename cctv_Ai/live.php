@@ -94,6 +94,7 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
                 </div>
                 <div class="operator-camera-frame camera-frame" data-camera-popup="<?= $num ?>" title="Click to enlarge and zoom">
                     <img id="cameraStream<?= $num ?>" data-ai-stream-url="<?= e($camera['ai_url']) ?>" data-raw-stream-url="<?= e($camera['raw_url']) ?>" data-stream-mode="ai" alt="<?= e($camera['name']) ?>">
+                    <canvas class="camera-ai-overlay" id="cameraOverlay<?= $num ?>" aria-hidden="true"></canvas>
                     <div class="stream-message" id="streamMessage<?= $num ?>"><i class="bi bi-camera-video"></i><b>WAITING FOR STREAM</b><span>Starting AI feed...</span></div>
                     <div class="camera-overlay-top"><span>CH<?= e($camera['channel']) ?></span><span class="camera-clock"></span></div>
                 </div>
