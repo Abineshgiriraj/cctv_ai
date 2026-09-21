@@ -1,7 +1,10 @@
+import json
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 
 def _int_list(name: str, default: str):
@@ -57,6 +60,22 @@ class Config:
                     "camera_name": f"Camera {idx+1}",
                     "area_name": f"Camera {idx+1} Area"
                 })
+        cache_path = BASE_DIR / "data" / "nvr_channel_titles.json"
+        if cache_path.is_file():
+            try:
+                title_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            except Exception:
+                title_cache = {}
+            for camera in cameras:
+                cached = title_cache.get(camera["camera_key"]) or {}
+                title = str(cached.get("camera_name") or "").strip()
+                if title:
+                    camera["camera_name"] = title
+                    # Use the actual NVR title as the location/area as well when
+                    # the configured area is only a generic recorder label.
+                    current_area = str(camera.get("area_name") or "").strip()
+                    if not current_area or current_area.lower().startswith("recorder "):
+                        camera["area_name"] = str(cached.get("area_name") or title).strip() or title
         return cameras
 
     CAMERAS = _parse_camera_config()
