@@ -26,6 +26,9 @@ class IncidentDetector:
         self.history = defaultdict(lambda: deque(maxlen=10))
         self.accident_votes = defaultdict(int)
         self.accident_last_seen = defaultdict(float)
+        self.accident_pair_history = defaultdict(
+            lambda: deque(maxlen=self.cfg.ACCIDENT_PAIR_HISTORY)
+        )
         self.last_incident = defaultdict(float)
 
         self.bg_models = {}
@@ -159,43 +162,113 @@ class IncidentDetector:
         return row_id
 
     def _detect_accident(self, camera, frame, vehicles, persons, draw_frame):
+        """High-precision accident screening.
+
+        A normal traffic stop is not enough. A pair must show:
+        1) genuine contact/very-close geometry,
+        2) a clear closing trajectory before contact,
+        3) meaningful pre-impact motion,
+        4) abrupt deceleration OR a nearby fallen-person cue,
+        5) the condition for several consecutive processed frames.
+        """
         camera_key = camera["camera_key"]
         h, w = frame.shape[:2]
         frame_diag = math.hypot(w, h)
+
         motion = {}
         for vehicle in vehicles:
             track_id = vehicle.get("track_id")
             if track_id is not None:
-                motion[track_id] = self._motion(camera_key, vehicle, frame_diag)
+                motion[track_id] = self._motion(
+                    camera_key, vehicle, frame_diag
+                )
 
         stored = 0
         now = time.time()
+
         for i in range(len(vehicles)):
             a = vehicles[i]
             if a.get("track_id") is None:
                 continue
+
             for j in range(i + 1, len(vehicles)):
                 b = vehicles[j]
                 if b.get("track_id") is None:
                     continue
 
-                a_id, b_id = sorted((int(a["track_id"]), int(b["track_id"])))
+                a_id, b_id = sorted(
+                    (int(a["track_id"]), int(b["track_id"]))
+                )
                 pair_key = (camera_key, a_id, b_id)
-                ac, bc = self._center(a["box"]), self._center(b["box"])
-                distance = math.hypot(ac[0] - bc[0], ac[1] - bc[1])
-                size_ref = max(self._box_diag(a["box"]), self._box_diag(b["box"]))
-                iou = self._iou(a["box"], b["box"])
-                near = (
-                    iou >= self.cfg.ACCIDENT_IOU_THRESHOLD
-                    or distance <= size_ref * self.cfg.ACCIDENT_PROXIMITY_RATIO
+
+                ac = self._center(a["box"])
+                bc = self._center(b["box"])
+                distance = math.hypot(
+                    ac[0] - bc[0],
+                    ac[1] - bc[1],
                 )
 
-                current_a, previous_a = motion.get(a["track_id"], (0.0, 0.0))
-                current_b, previous_b = motion.get(b["track_id"], (0.0, 0.0))
-                previous_fast = max(previous_a, previous_b) >= self.cfg.ACCIDENT_MIN_MOTION_RATIO
-                current_slow = (
-                    current_a <= max(0.002, previous_a * self.cfg.ACCIDENT_STOP_RATIO)
-                    or current_b <= max(0.002, previous_b * self.cfg.ACCIDENT_STOP_RATIO)
+                size_ref = max(
+                    self._box_diag(a["box"]),
+                    self._box_diag(b["box"]),
+                    1.0,
+                )
+                normalized_distance = distance / size_ref
+                iou = self._iou(a["box"], b["box"])
+
+                pair_hist = self.accident_pair_history[pair_key]
+                pair_hist.append((now, normalized_distance, iou))
+
+                # Measure whether the two tracks were actually closing before
+                # the current near-contact frame. Tailgating / queueing usually
+                # produces nearly constant pair distance and is rejected.
+                closing_ratio = 0.0
+                if len(pair_hist) >= 3:
+                    older = [row[1] for row in list(pair_hist)[:-1]]
+                    older_ref = max(older) if older else normalized_distance
+                    closing_ratio = max(
+                        0.0,
+                        older_ref - normalized_distance,
+                    )
+
+                current_a, previous_a = motion.get(
+                    a["track_id"], (0.0, 0.0)
+                )
+                current_b, previous_b = motion.get(
+                    b["track_id"], (0.0, 0.0)
+                )
+
+                moved_before = (
+                    max(previous_a, previous_b)
+                    >= self.cfg.ACCIDENT_MIN_MOTION_RATIO
+                )
+
+                abrupt_stop_a = (
+                    previous_a >= self.cfg.ACCIDENT_MIN_MOTION_RATIO
+                    and current_a
+                    <= max(
+                        0.0015,
+                        previous_a * self.cfg.ACCIDENT_STOP_RATIO,
+                    )
+                )
+                abrupt_stop_b = (
+                    previous_b >= self.cfg.ACCIDENT_MIN_MOTION_RATIO
+                    and current_b
+                    <= max(
+                        0.0015,
+                        previous_b * self.cfg.ACCIDENT_STOP_RATIO,
+                    )
+                )
+                abrupt_stop = abrupt_stop_a or abrupt_stop_b
+
+                strong_contact = (
+                    iou >= self.cfg.ACCIDENT_IOU_THRESHOLD
+                    or normalized_distance
+                    <= self.cfg.ACCIDENT_PROXIMITY_RATIO
+                )
+                closing = (
+                    closing_ratio
+                    >= self.cfg.ACCIDENT_MIN_CLOSING_RATIO
                 )
 
                 union = [
@@ -204,31 +277,70 @@ class IncidentDetector:
                     max(a["box"][2], b["box"][2]),
                     max(a["box"][3], b["box"][3]),
                 ]
-                fallen = self._fallen_person_near(persons, union)
-                candidate = near and previous_fast and (current_slow or fallen)
+                fallen = self._fallen_person_near(
+                    persons, union
+                )
+
+                # Two independent high-precision paths:
+                # - vehicle-to-vehicle impact: contact + closing + abrupt stop
+                # - possible rider crash: contact/near + motion + fallen person
+                vehicle_impact = (
+                    strong_contact
+                    and moved_before
+                    and closing
+                    and abrupt_stop
+                )
+                rider_impact = (
+                    strong_contact
+                    and moved_before
+                    and fallen
+                    and (
+                        closing
+                        or abrupt_stop
+                    )
+                )
+                candidate = vehicle_impact or rider_impact
 
                 if candidate:
                     self.accident_votes[pair_key] += 1
                     self.accident_last_seen[pair_key] = now
-                elif now - self.accident_last_seen[pair_key] > 2.0:
-                    self.accident_votes[pair_key] = 0
+                else:
+                    # Reset quickly. Normal traffic should not accumulate
+                    # accident votes from unrelated intermittent frames.
+                    if (
+                        now - self.accident_last_seen[pair_key]
+                        > 0.8
+                    ):
+                        self.accident_votes[pair_key] = 0
 
-                if self.accident_votes[pair_key] < self.cfg.ACCIDENT_CONFIRM_FRAMES:
+                if (
+                    self.accident_votes[pair_key]
+                    < self.cfg.ACCIDENT_CONFIRM_FRAMES
+                ):
                     continue
 
-                score = min(
-                    0.99,
-                    0.45
-                    + min(0.25, iou)
-                    + (0.20 if current_slow else 0)
-                    + (0.15 if fallen else 0),
-                )
+                score = 0.50
+                score += min(0.20, iou * 0.80)
+                score += min(0.12, closing_ratio * 0.35)
+                if abrupt_stop:
+                    score += 0.12
+                if fallen:
+                    score += 0.16
+                score = min(0.99, score)
+
+                # Only draw after the strict multi-frame confirmation.
                 if draw_frame is not None:
                     x1, y1, x2, y2 = union
-                    cv2.rectangle(draw_frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    cv2.rectangle(
+                        draw_frame,
+                        (x1, y1),
+                        (x2, y2),
+                        (0, 0, 255),
+                        3,
+                    )
                     cv2.putText(
                         draw_frame,
-                        f"ACCIDENT CANDIDATE {score * 100:.0f}%",
+                        f"POSSIBLE ACCIDENT {score * 100:.0f}%",
                         (x1, max(25, y1 - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.62,
@@ -247,15 +359,40 @@ class IncidentDetector:
                         "track_ids": [a_id, b_id],
                         "iou": iou,
                         "distance_px": distance,
-                        "previous_motion": [previous_a, previous_b],
-                        "current_motion": [current_a, current_b],
+                        "normalized_distance": normalized_distance,
+                        "closing_ratio": closing_ratio,
+                        "previous_motion": [
+                            previous_a,
+                            previous_b,
+                        ],
+                        "current_motion": [
+                            current_a,
+                            current_b,
+                        ],
+                        "abrupt_stop": abrupt_stop,
                         "fallen_person_cue": fallen,
-                        "method": "trajectory_proximity_sudden_stop",
+                        "confirm_frames": self.cfg.ACCIDENT_CONFIRM_FRAMES,
+                        "method": (
+                            "high_precision_contact_closing_"
+                            "deceleration_multi_frame"
+                        ),
                     },
                 )
                 if row_id:
                     stored += 1
+
                 self.accident_votes[pair_key] = 0
+
+        # Remove stale pair state so track-id reuse cannot inherit old votes.
+        for key in list(self.accident_pair_history):
+            if key[0] != camera_key:
+                continue
+            history = self.accident_pair_history[key]
+            if history and now - history[-1][0] > 5.0:
+                self.accident_pair_history.pop(key, None)
+                self.accident_votes.pop(key, None)
+                self.accident_last_seen.pop(key, None)
+
         return stored
 
     def _detect_obstruction(self, camera, frame, vehicles, persons, draw_frame):
