@@ -142,7 +142,10 @@
         tracks: new Map(),
         lastPayloadAt: 0,
         lastDetectionAge: null,
-        lastRevision: -1
+        lastRevision: -1,
+        helmetDetections: [],
+        lastHelmetAge: null,
+        lastHelmetRevision: -1
       });
     }
     return cameraOverlayStates.get(number);
@@ -162,83 +165,54 @@
 
     canvas.classList.remove('hidden');
     const state = ensureOverlayState(number);
-    const now = performance.now();
     state.sourceWidth = Number(payload?.source_width || state.sourceWidth || 0);
     state.sourceHeight = Number(payload?.source_height || state.sourceHeight || 0);
-    state.lastPayloadAt = now;
+    state.lastPayloadAt = performance.now();
     state.lastDetectionAge = Number(payload?.age_seconds);
+    state.lastHelmetAge = Number(payload?.helmet_age_seconds);
 
     const revision = Number(payload?.revision ?? -1);
-    if (revision === state.lastRevision) {
-      return;
-    }
-    state.lastRevision = revision;
+    if (revision !== state.lastRevision) {
+      state.lastRevision = revision;
+      state.tracks.clear();
 
-    const detections = Array.isArray(payload?.detections) ? payload.detections : [];
-    const seen = new Set();
+      const detections = Array.isArray(payload?.detections) ? payload.detections : [];
+      detections.forEach((det, index) => {
+        const box = Array.isArray(det.box) ? det.box.map(Number) : [];
+        if (box.length !== 4 || box.some(v => !Number.isFinite(v))) return;
 
-    detections.forEach((det, index) => {
-      const box = Array.isArray(det.box) ? det.box.map(Number) : [];
-      if (box.length !== 4 || box.some(v => !Number.isFinite(v))) return;
+        const trackKey = det.track_id !== null && det.track_id !== undefined
+          ? `track-${det.track_id}`
+          : `det-${String(det.label || 'object')}-${index}`;
 
-      const trackKey = det.track_id !== null && det.track_id !== undefined
-        ? `track-${det.track_id}`
-        : `det-${String(det.label || 'object')}-${index}`;
-      seen.add(trackKey);
-
-      const existing = state.tracks.get(trackKey);
-      const previousTarget = existing?.targetBox || existing?.currentBox || box;
-      const previousUpdateAt = existing?.updatedAt || now - 500;
-      const updateGap = Math.max(180, Math.min(1100, now - previousUpdateAt));
-
-      const velocity = previousTarget.map((value, i) => (
-        (box[i] - value) / updateGap
-      ));
-
-      state.tracks.set(trackKey, {
-        key: trackKey,
-        trackId: det.track_id,
-        label: String(det.label || 'object').toLowerCase(),
-        confidence: Number(det.confidence || 0),
-        startBox: existing?.currentBox?.slice() || previousTarget.slice(),
-        currentBox: existing?.currentBox?.slice() || previousTarget.slice(),
-        targetBox: box.slice(),
-        velocity,
-        animationStart: now,
-        animationDuration: Math.max(260, Math.min(700, updateGap * 0.72)),
-        updatedAt: now,
-        missingSince: null
+        state.tracks.set(trackKey, {
+          key: trackKey,
+          trackId: det.track_id,
+          label: String(det.label || 'object').toLowerCase(),
+          confidence: Number(det.confidence || 0),
+          box
+        });
       });
-    });
+    }
 
-    state.tracks.forEach((track, key) => {
-      if (seen.has(key)) return;
-      if (track.missingSince === null) track.missingSince = now;
-      if (now - track.missingSince > 1800) state.tracks.delete(key);
-    });
+    const helmetRevision = Number(payload?.helmet_revision ?? -1);
+    if (helmetRevision !== state.lastHelmetRevision) {
+      state.lastHelmetRevision = helmetRevision;
+      state.helmetDetections = Array.isArray(payload?.helmet_detections)
+        ? payload.helmet_detections
+        : [];
+    }
 
     startOverlayAnimation();
   }
 
-  function interpolateBox(track, now) {
-    const duration = Math.max(1, track.animationDuration || 400);
-    const raw = Math.min(1, Math.max(0, (now - track.animationStart) / duration));
-    const eased = 1 - Math.pow(1 - raw, 3);
-    const box = track.startBox.map((start, i) => (
-      start + (track.targetBox[i] - start) * eased
-    ));
-
-    // A tiny capped prediction after the interpolation finishes keeps the box
-    // moving naturally until the next AI result arrives, instead of freezing.
-    if (raw >= 1) {
-      const extraMs = Math.min(220, Math.max(0, now - (track.animationStart + duration)));
-      for (let i = 0; i < 4; i++) {
-        box[i] += (track.velocity?.[i] || 0) * extraMs * 0.35;
-      }
-    }
-    track.currentBox = box;
-    return box;
+  function interpolateBox(track) {
+    // Exact ByteTrack result from the latest processed frame. No browser-side
+    // prediction/interpolation is applied, so boxes do not drift away from the
+    // actual detected object between AI frames.
+    return Array.isArray(track.box) ? track.box : [0, 0, 0, 0];
   }
+
 
   function renderCameraOverlay(number, now) {
     const canvas = q(`#cameraOverlay${number}`);
@@ -297,8 +271,7 @@
     if (payloadStale) return;
 
     state.tracks.forEach(track => {
-      if (track.missingSince !== null && now - track.missingSince > 1200) return;
-      const box = interpolateBox(track, now);
+      const box = interpolateBox(track);
       const x = offsetX + box[0] * scale;
       const y = offsetY + box[1] * scale;
       const w = Math.max(1, (box[2] - box[0]) * scale);
@@ -323,6 +296,36 @@
       ctx.fillStyle = color;
       ctx.fillText(label, x + 4, labelY + 12);
     });
+
+    const helmetAge = Number(state.lastHelmetAge);
+    if (!Number.isFinite(helmetAge) || helmetAge <= 4) {
+      (state.helmetDetections || []).forEach(det => {
+        const box = Array.isArray(det.box) ? det.box.map(Number) : [];
+        if (box.length !== 4 || box.some(v => !Number.isFinite(v))) return;
+
+        const x = offsetX + box[0] * scale;
+        const y = offsetY + box[1] * scale;
+        const w = Math.max(1, (box[2] - box[0]) * scale);
+        const h = Math.max(1, (box[3] - box[1]) * scale);
+        const noHelmet = String(det.label || '').toLowerCase() === 'no_helmet';
+        const color = noHelmet ? '#ef4444' : '#22c55e';
+        const confidence = Math.round(Number(det.confidence || 0) * 100);
+        const confirmed = det.confirmed ? '' : ' ?';
+        const text = `${noHelmet ? 'NO HELMET' : 'HELMET'}${confirmed} ${confidence}%`;
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, y, w, h);
+
+        ctx.font = '800 10px Manrope, sans-serif';
+        const textWidth = Math.min(width - x, ctx.measureText(text).width + 10);
+        const labelY = Math.max(offsetY, y - 19);
+        ctx.fillStyle = 'rgba(2, 8, 14, .88)';
+        ctx.fillRect(x, labelY, Math.max(0, textWidth), 18);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x + 5, labelY + 13);
+      });
+    }
   }
 
   function startOverlayAnimation() {
@@ -1029,7 +1032,7 @@
   fetchViolations();
   refreshHelmetModelStatus();
   setInterval(refreshHealth, 3000);
-  setInterval(refreshVisibleDetections, 350);
+  setInterval(refreshVisibleDetections, 120);
   setInterval(refreshTodaySummary, 5000);
   setInterval(fetchReportData, 5000);
   setInterval(fetchViolations, 5000);

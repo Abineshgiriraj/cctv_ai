@@ -121,6 +121,22 @@ class Config:
     AI_MODEL_IDLE_UNLOAD_SECONDS = max(2.0, float(os.getenv("AI_MODEL_IDLE_UNLOAD_SECONDS", 15)))
     FOREGROUND_AI_FPS = max(0.1, float(os.getenv("FOREGROUND_AI_FPS", 1.0)))
     BACKGROUND_AI_FPS = max(0.02, float(os.getenv("BACKGROUND_AI_FPS", 0.20)))
+
+    # Focused cameras can use the original Ultralytics ByteTrack path (model.track
+    # with persist=True) instead of the lightweight shared-camera matcher. This
+    # restores frame-by-frame IDs/trajectories for the cameras the operator is
+    # actively viewing, while hidden cameras remain on the shared background pool.
+    FOREGROUND_BYTETRACK_ENABLED = _bool("FOREGROUND_BYTETRACK_ENABLED", True)
+    FOREGROUND_TRACK_FPS = max(0.0, float(os.getenv("FOREGROUND_TRACK_FPS", 0.0)))
+    FOREGROUND_TRACK_IMGSZ = max(
+        320, int(os.getenv("FOREGROUND_TRACK_IMGSZ", 512))
+    )
+    FOREGROUND_TRACK_CONCURRENCY = max(
+        1, min(8, int(os.getenv("FOREGROUND_TRACK_CONCURRENCY", 2)))
+    )
+    FOREGROUND_TRACK_IDLE_SECONDS = max(
+        1.0, float(os.getenv("FOREGROUND_TRACK_IDLE_SECONDS", 3.0))
+    )
     BACKGROUND_CAMERAS_PER_CYCLE = max(
         1, min(4, int(os.getenv("BACKGROUND_CAMERAS_PER_CYCLE", 1)))
     )

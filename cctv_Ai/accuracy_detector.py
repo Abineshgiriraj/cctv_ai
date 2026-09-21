@@ -394,6 +394,7 @@ class AccuracyDetector(AdvancedDetector):
         summary = {
             "helmet_checked": 0, "helmet_detected": 0, "no_helmet_detected": 0,
             "helmet_violations": 0, "plate_detected": 0, "plate_read": 0, "road_events": 0,
+            "helmet_live": [],
         }
         if not self.cfg.ADVANCED_DETECTION_ENABLED or primary_result is None:
             return summary
@@ -481,6 +482,13 @@ class AccuracyDetector(AdvancedDetector):
 
                 color = (0, 0, 255) if status == "no_helmet" else (0, 220, 80)
                 label = "NO HELMET" if status == "no_helmet" else "HELMET"
+                summary["helmet_live"].append({
+                    "label": "no_helmet" if status == "no_helmet" else "helmet",
+                    "confidence": round(float(confidence), 4),
+                    "track_id": track_id,
+                    "box": [int(v) for v in observation["box"]],
+                    "confirmed": bool(confirmation),
+                })
                 self._draw(draw_frame, observation["box"], f"{label}{suffix} {confidence * 100:.0f}%", color)
 
                 if not confirmation:

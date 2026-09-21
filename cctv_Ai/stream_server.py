@@ -41,6 +41,9 @@ lock = threading.RLock()
 # Serialize heavy YOLO inference across cameras so CPU/GPU work cannot starve
 # the RTSP capture threads. Each camera still has its own model/tracker state.
 inference_lock = threading.Lock()
+foreground_inference_semaphore = threading.Semaphore(
+    Config.FOREGROUND_TRACK_CONCURRENCY
+)
 
 # In paged-camera mode only the cameras visible on the current Live Monitoring
 # page open RTSP and run AI. This prevents 90+ simultaneous NVR streams/models
@@ -709,8 +712,13 @@ class _SimpleCameraTracker:
         return _TrackedResult(tracked_boxes)
 
 
-def shared_ai_worker(worker_id: int, cameras):
-    """Continuously monitor a camera partition with one shared YOLO model."""
+def shared_ai_worker(worker_id: int, cameras, background_only: bool = False):
+    """Continuously monitor cameras with one shared YOLO model.
+
+    When background_only=True, focused UI cameras are deliberately excluded so
+    they can use the original per-camera model.track(..., persist=True,
+    bytetrack.yaml) path without competing with the shared predictor.
+    """
     try:
         from ultralytics import YOLO
         model = YOLO(Config.YOLO_MODEL)
@@ -762,7 +770,7 @@ def shared_ai_worker(worker_id: int, cameras):
     while True:
         did_work = False
 
-        focused = [
+        focused = [] if background_only else [
             camera for camera in cameras
             if is_camera_focused(camera["camera_key"])
         ]
@@ -795,6 +803,9 @@ def shared_ai_worker(worker_id: int, cameras):
             foreground_turns = 0
 
         if not ordered_cameras:
+            if background_only:
+                time.sleep(0.02)
+                continue
             ordered_cameras = cameras[:1]
 
         for camera in ordered_cameras:
@@ -1015,17 +1026,28 @@ def _annotate_tracking(camera, frame, result, model, history, last_seen,
     return persons, vehicles, dict(class_counts)
 
 
-def ai_tracking_worker(camera: dict):
+def ai_tracking_worker(camera: dict, focus_only: bool = False, exit_on_unfocus: bool = False):
     camera_key = camera["camera_key"]
     camera_ip = camera["camera_ip"]
-    """Run YOLO/ByteTrack only for active paged cameras and lazy-load the model."""
+    """Run true Ultralytics ByteTrack for one camera.
+
+    focus_only=True restores the original frame-by-frame tracking path only for
+    cameras currently displayed in the UI. Hidden cameras continue through the
+    shared background monitor.
+    """
 
     set_ai_status(camera_key, enabled=True, model_loaded=False, last_error=None)
     model = None
     last_active_at = 0.0
+    unfocused_since = None
     last_seq = -1
     last_started = 0.0
-    min_interval = 1.0 / max(Config.AI_MAX_FPS, 0.25)
+    if focus_only and Config.FOREGROUND_TRACK_FPS <= 0:
+        min_interval = 0.0
+    elif focus_only:
+        min_interval = 1.0 / max(Config.FOREGROUND_TRACK_FPS, 0.1)
+    else:
+        min_interval = 1.0 / max(Config.AI_MAX_FPS, 0.25)
     history = defaultdict(lambda: deque(maxlen=Config.TRACK_TRAIL_LENGTH))
     last_seen = {}
     processed_index = 0
@@ -1034,15 +1056,21 @@ def ai_tracking_worker(camera: dict):
         traffic_state[camera_key] = count_state
 
     while True:
-        if not is_camera_active(camera_key):
-            if model is not None and (time.time() - last_active_at) >= Config.AI_MODEL_IDLE_UNLOAD_SECONDS:
-                log.info("Unloading idle YOLO model camera=%s", camera_key)
+        active_now = is_camera_focused(camera_key) if focus_only else is_camera_active(camera_key)
+        if not active_now:
+            if unfocused_since is None:
+                unfocused_since = time.time()
+            idle_limit = (
+                Config.FOREGROUND_TRACK_IDLE_SECONDS
+                if focus_only
+                else Config.AI_MODEL_IDLE_UNLOAD_SECONDS
+            )
+            if model is not None and (time.time() - last_active_at) >= idle_limit:
+                log.info("Unloading idle YOLO tracker camera=%s focus_only=%s", camera_key, focus_only)
                 model = None
                 history.clear()
                 last_seen.clear()
-                count_state = _new_traffic_state()
                 with lock:
-                    traffic_state[camera_key] = count_state
                     tracked_frames.pop(camera_key, None)
                 set_ai_status(camera_key, model_loaded=False, last_error=None)
                 gc.collect()
@@ -1052,9 +1080,12 @@ def ai_tracking_worker(camera: dict):
                         torch.cuda.empty_cache()
                 except Exception:
                     pass
-            time.sleep(0.20)
+            if focus_only and exit_on_unfocus and (time.time() - unfocused_since) >= idle_limit:
+                return
+            time.sleep(0.08 if focus_only else 0.20)
             continue
 
+        unfocused_since = None
         last_active_at = time.time()
 
         if model is None:
@@ -1063,7 +1094,12 @@ def ai_tracking_worker(camera: dict):
                 log.info("Loading YOLO model camera=%s model=%s", camera_key, Config.YOLO_MODEL)
                 model = YOLO(Config.YOLO_MODEL)
                 set_ai_status(camera_key, model_loaded=True, last_error=None)
-                log.info("AI tracker ready camera=%s classes=%s", camera_key, Config.TARGET_CLASSES)
+                log.info(
+                    "AI tracker ready camera=%s classes=%s mode=%s",
+                    camera_key,
+                    Config.TARGET_CLASSES,
+                    "focused-bytetrack" if focus_only else "dedicated",
+                )
                 last_seq = -1
             except Exception as exc:
                 msg = f"YOLO model load failed: {exc}"
@@ -1091,7 +1127,13 @@ def ai_tracking_worker(camera: dict):
         started = time.perf_counter()
 
         try:
-            with inference_lock:
+            track_imgsz = (
+                Config.FOREGROUND_TRACK_IMGSZ
+                if focus_only
+                else Config.YOLO_IMGSZ
+            )
+            gate = foreground_inference_semaphore if focus_only else inference_lock
+            with gate:
                 results = model.track(
                     source=work,
                     persist=True,
@@ -1099,7 +1141,7 @@ def ai_tracking_worker(camera: dict):
                     classes=Config.TARGET_CLASSES,
                     conf=Config.CONFIDENCE_THRESHOLD,
                     iou=Config.IOU_THRESHOLD,
-                    imgsz=Config.YOLO_IMGSZ,
+                    imgsz=track_imgsz,
                     device=Config.YOLO_DEVICE or None,
                     verbose=False,
                 )
@@ -1124,22 +1166,28 @@ def ai_tracking_worker(camera: dict):
                 _draw_count_line(work, int(work.shape[0] * Config.COUNT_LINE_Y_RATIO))
                 _draw_summary(work, persons, vehicles, inference_ms, count_state["session_total"])
 
-            ok, encoded = cv2.imencode(
-                ".jpg",
-                work,
-                [int(cv2.IMWRITE_JPEG_QUALITY), Config.JPEG_QUALITY],
-            )
-            if not ok:
-                raise RuntimeError("AI JPEG encode failed")
+            jpeg = None
+            if Config.GENERATE_TRACKED_MJPEG:
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    work,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), Config.JPEG_QUALITY],
+                )
+                if not ok:
+                    raise RuntimeError("AI JPEG encode failed")
+                jpeg = encoded.tobytes()
 
-            jpeg = encoded.tobytes()
             now = time.time()
             with lock:
-                tracked_frames[camera_key] = jpeg
+                if jpeg is not None:
+                    tracked_frames[camera_key] = jpeg
+                else:
+                    tracked_frames.pop(camera_key, None)
                 row = ai_status.setdefault(camera_key, default_ai_row())
                 row["model_loaded"] = True
+                row["monitor_mode"] = "focused_bytetrack" if focus_only else "dedicated_bytetrack"
                 row["tracked_frames"] = int(row.get("tracked_frames") or 0) + 1
-                row["last_jpeg_bytes"] = len(jpeg)
+                row["last_jpeg_bytes"] = len(jpeg) if jpeg is not None else 0
                 row["last_processed_at"] = now
                 row["last_inference_ms"] = round(inference_ms, 1)
                 row["last_error"] = None
@@ -1155,6 +1203,45 @@ def ai_tracking_worker(camera: dict):
             log.exception("%s camera=%s", msg, camera_ip)
             set_ai_status(camera_key, last_error=msg, last_error_at=time.time())
             time.sleep(0.5)
+
+
+_foreground_tracker_threads = {}
+_foreground_tracker_threads_lock = threading.Lock()
+
+
+def foreground_tracker_manager(cameras):
+    """Start/stop true ByteTrack workers as the operator changes visible cameras."""
+    camera_by_key = {camera["camera_key"]: camera for camera in cameras}
+    while True:
+        _ensure_initial_focus()
+        with lock:
+            focused_keys = list(active_camera_keys)
+
+        with _foreground_tracker_threads_lock:
+            # Remove completed workers.
+            for key, thread in list(_foreground_tracker_threads.items()):
+                if not thread.is_alive():
+                    _foreground_tracker_threads.pop(key, None)
+
+            # A focused camera gets its own persistent ByteTrack state, matching
+            # the original pre-shared-worker tracking behavior.
+            for key in focused_keys:
+                thread = _foreground_tracker_threads.get(key)
+                if thread is not None and thread.is_alive():
+                    continue
+                camera = camera_by_key.get(key)
+                if camera is None:
+                    continue
+                thread = threading.Thread(
+                    target=ai_tracking_worker,
+                    args=(camera, True, True),
+                    daemon=True,
+                    name=f"foreground-bytetrack-{key}",
+                )
+                _foreground_tracker_threads[key] = thread
+                thread.start()
+
+        time.sleep(0.15)
 
 
 def generate_mjpeg(camera_key: str, source: str = "raw"):
@@ -1246,11 +1333,15 @@ def live_detections():
         for key in keys:
             row = dict(ai_status.get(key) or default_ai_row())
             detected_at = row.get("detections_at")
+            helmet_at = row.get("helmet_detections_at")
             payload[key] = {
                 "detections": row.get("detections") or [],
+                "helmet_detections": row.get("helmet_detections") or [],
                 "source_width": int(row.get("source_width") or 0),
                 "source_height": int(row.get("source_height") or 0),
                 "age_seconds": None if detected_at is None else round(now - detected_at, 2),
+                "helmet_age_seconds": None if helmet_at is None else round(now - helmet_at, 2),
+                "helmet_revision": 0 if helmet_at is None else float(helmet_at),
                 "revision": int(row.get("tracked_frames") or 0),
                 "last_inference_ms": row.get("last_inference_ms"),
                 "last_error": row.get("last_error"),
@@ -1336,6 +1427,8 @@ def health():
         "connected_total": connected_total,
         "ai_processed_total": ai_processed_total,
         "shared_ai_workers": Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
+        "foreground_bytetrack": Config.FOREGROUND_BYTETRACK_ENABLED,
+        "foreground_track_concurrency": Config.FOREGROUND_TRACK_CONCURRENCY,
         "active_camera_keys": active_list,
         "active_camera_limit": Config.ACTIVE_CAMERA_LIMIT,
         "configured_total": len(allowed_keys()),
@@ -1478,9 +1571,17 @@ if __name__ == "__main__":
                 continue
             threading.Thread(
                 target=shared_ai_worker,
-                args=(worker_id, partition),
+                args=(worker_id, partition, Config.FOREGROUND_BYTETRACK_ENABLED),
                 daemon=True,
                 name=f"shared-ai-{worker_id}",
+            ).start()
+
+        if Config.FOREGROUND_BYTETRACK_ENABLED:
+            threading.Thread(
+                target=foreground_tracker_manager,
+                args=(cameras,),
+                daemon=True,
+                name="foreground-bytetrack-manager",
             ).start()
     else:
         for cam in cameras:
