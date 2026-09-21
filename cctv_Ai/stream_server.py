@@ -82,9 +82,7 @@ def is_camera_focused(camera_key: str) -> bool:
 
 
 def is_camera_active(camera_key: str) -> bool:
-    """Whether RTSP/background monitoring should remain active."""
-    if Config.MONITOR_ALL_CAMERAS:
-        return True
+    """Only cameras currently displayed in the Live UI are monitored."""
     return is_camera_focused(camera_key)
 
 
@@ -1076,25 +1074,29 @@ def health():
                 },
             }
 
-    if Config.MONITOR_ALL_CAMERAS:
-        monitored_rows = [row for row in cameras.values() if row.get("monitored")]
-        connected_total = sum(1 for row in monitored_rows if row.get("connected"))
-        ai_processed_total = sum(
-            1
-            for row in monitored_rows
-            if row.get("ai", {}).get("age_seconds") is not None
-            and not row.get("ai", {}).get("last_error")
-        )
-        live = connected_total == len(monitored_rows) if monitored_rows else False
-        ai_live = ai_processed_total == len(monitored_rows) if monitored_rows else False
-    else:
-        connected_total = sum(1 for row in cameras.values() if row.get("connected"))
-        ai_processed_total = sum(
-            1 for row in cameras.values()
-            if row.get("ai", {}).get("age_seconds") is not None
-        )
-        live = all(c["has_frame"] for c in cameras.values()) if cameras else False
-        ai_live = all(c["ai"]["has_frame"] for c in cameras.values()) if cameras else False
+    _ensure_initial_focus()
+    with lock:
+        active_list = list(active_camera_keys) if Config.PAGED_CAMERA_MODE else allowed_keys()
+
+    active_set = set(active_list)
+    monitored_rows = [
+        row for key, row in cameras.items()
+        if key in active_set
+    ]
+    connected_total = sum(1 for row in monitored_rows if row.get("connected"))
+    ai_processed_total = sum(
+        1 for row in monitored_rows
+        if row.get("ai", {}).get("age_seconds") is not None
+        and not row.get("ai", {}).get("last_error")
+    )
+    live = (
+        all(bool(row.get("has_frame")) for row in monitored_rows)
+        if monitored_rows else False
+    )
+    ai_live = (
+        all(bool(row.get("ai", {}).get("has_frame")) for row in monitored_rows)
+        if monitored_rows else False
+    )
 
     today_counts = None
     if traffic_store is not None:
@@ -1103,19 +1105,15 @@ def health():
         except Exception as exc:
             log.warning("Unable to read traffic counts: %s", exc)
 
-    _ensure_initial_focus()
-    with lock:
-        active_list = list(active_camera_keys) if Config.PAGED_CAMERA_MODE else allowed_keys()
-
     return jsonify({
         "ok": live,
         "ai_ok": ai_live,
         "paged_mode": Config.PAGED_CAMERA_MODE,
-        "monitor_all_cameras": Config.MONITOR_ALL_CAMERAS,
-        "monitored_total": len(allowed_keys()) if Config.MONITOR_ALL_CAMERAS else len(active_list),
+        "monitor_all_cameras": False,
+        "monitored_total": len(active_list),
         "connected_total": connected_total,
         "ai_processed_total": ai_processed_total,
-        "shared_ai_workers": Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
+        "shared_ai_workers": 0,
         "active_camera_keys": active_list,
         "active_camera_limit": Config.ACTIVE_CAMERA_LIMIT,
         "configured_total": len(allowed_keys()),
