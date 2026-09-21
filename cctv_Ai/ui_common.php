@@ -113,7 +113,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="stylesheet" href="assets/app.css">
-    <link rel="stylesheet" href="assets/ops.css">
+    <link rel="stylesheet" href="assets/ops.css?v=7">
     <link rel="stylesheet" href="assets/road.css">
 </head>
 <body>
@@ -164,7 +164,7 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app_fixed.js?v=6"></script>
+<script src="assets/app_fixed.js?v=7"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
