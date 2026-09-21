@@ -5,7 +5,7 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
 <section class="section-block" id="live-monitoring">
     <div class="camera-pagination-bar" id="cameraPagination">
         <div class="camera-pagination-summary">
-            <strong id="cameraPageSummary">Cameras 1-4</strong>
+            <strong id="cameraPageSummary">Cameras 1-2</strong>
             <span id="cameraPageConfigured"><?= count($cameras) ?> configured</span>
         </div>
         <div class="camera-pagination-actions">
@@ -67,9 +67,10 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
             </div>
 
             <label for="cameraPageSize">Show</label>
-            <select id="cameraPageSize" aria-label="Cameras per page">
-                <option value="4" selected>4 cameras</option>
-                <option value="8">8 cameras</option>
+            <select id="cameraPageSize" aria-label="Cameras to access and display at the same time">
+                <option value="2" selected>2 cameras</option>
+                <option value="6">6 cameras</option>
+                <option value="10">10 cameras</option>
             </select>
             <button type="button" id="cameraPrevPage"><i class="bi bi-chevron-left"></i> Previous</button>
             <span id="cameraPageLabel">Page 1</span>
@@ -81,8 +82,8 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
         <span class="health-summary-chip online"><i class="bi bi-check-circle-fill"></i> Online <b id="healthOnlineCount">0</b></span>
         <span class="health-summary-chip offline"><i class="bi bi-x-circle-fill"></i> Offline <b id="healthOfflineCount">0</b></span>
         <span class="health-summary-chip ai"><i class="bi bi-cpu-fill"></i> AI Processed <b id="healthAiCount">0</b></span>
-        <span class="health-summary-chip total"><i class="bi bi-camera-video-fill"></i> Total <b id="healthTotalCount"><?= count($cameras) ?></b></span>
-        <span class="camera-health-help"><i class="bi bi-info-circle"></i> Online = RTSP connected. Click a camera image to open full-screen view and zoom.</span>
+        <span class="health-summary-chip total"><i class="bi bi-camera-video-fill"></i> Active on Screen <b id="healthTotalCount">0</b></span>
+        <span class="camera-health-help"><i class="bi bi-info-circle"></i> Only cameras currently displayed are opened and processed. Changing page/selection moves the previous cameras to standby.</span>
     </div>
 
     <div class="operator-camera-grid">
