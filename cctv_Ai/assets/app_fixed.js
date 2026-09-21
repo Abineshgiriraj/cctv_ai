@@ -6,7 +6,7 @@
   const healthUrl = cfg.healthUrl || `${baseUrl}/health`;
   const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
   let livePage = 1;
-  let livePageSize = 4;
+  let livePageSize = 2;
   let visibleCameraKeys = [];
   let recorderFilter = '';
   let cameraHealthFilter = '';
@@ -176,7 +176,8 @@
     const pickerToggle = q('#cameraPickerToggle');
     const pickerMenu = q('#cameraPickerMenu');
 
-    livePageSize = Number(size?.value || 8) === 4 ? 4 : 8;
+    const requestedPageSize = Number(size?.value || 2);
+    livePageSize = [2, 6, 10].includes(requestedPageSize) ? requestedPageSize : 2;
     recorderFilter = recorder?.value || '';
     cameraHealthFilter = health?.value || '';
 
@@ -223,7 +224,8 @@
       applyCameraPage();
     });
     size?.addEventListener('change', () => {
-      livePageSize = Number(size.value) === 4 ? 4 : 8;
+      const requested = Number(size.value);
+      livePageSize = [2, 6, 10].includes(requested) ? requested : 2;
       livePage = 1;
       applyCameraPage();
     });
@@ -460,17 +462,17 @@
       latestHealthData = data;
       updatePickerHealth();
 
-      const healthRows = cameras.map(cam => data?.cameras?.[cam.camera_key] || {});
-      const onlineTotal = healthRows.filter(st => !!st.connected).length;
-      const offlineTotal = cameras.length - onlineTotal;
-      const aiTotal = healthRows.filter(st => {
+      const visibleRows = visibleCameraKeys.map(key => data?.cameras?.[key] || {});
+      const onlineTotal = visibleRows.filter(st => !!st.connected).length;
+      const offlineTotal = Math.max(0, visibleRows.length - onlineTotal);
+      const aiTotal = visibleRows.filter(st => {
         const ai = st?.ai || {};
         return ai.age_seconds !== null && ai.age_seconds !== undefined && !ai.last_error;
       }).length;
       setText('healthOnlineCount', onlineTotal);
       setText('healthOfflineCount', offlineTotal);
       setText('healthAiCount', aiTotal);
-      setText('healthTotalCount', cameras.length);
+      setText('healthTotalCount', visibleRows.length);
 
       let liveCount = 0;
       let aiLiveCount = 0;
