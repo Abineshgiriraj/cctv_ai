@@ -189,7 +189,9 @@ def capture_stream(camera: dict):
     camera_key = camera["camera_key"]
     camera_ip = camera["camera_ip"]
     """Keep RTSP open for every camera when MONITOR_ALL_CAMERAS is enabled."""
-    reconnect_delay = 3
+    reconnect_delay = Config.RTSP_RECONNECT_SECONDS + (
+        int(camera.get("channel_no") or 1) % 5
+    ) * 0.35
 
     while True:
         if not is_camera_active(camera_key):
@@ -1226,6 +1228,8 @@ if __name__ == "__main__":
             daemon=True,
             name=f"capture-{camera_key}",
         ).start()
+        if Config.CAMERA_CONNECT_STAGGER_SECONDS:
+            time.sleep(Config.CAMERA_CONNECT_STAGGER_SECONDS)
 
     if Config.MONITOR_ALL_CAMERAS:
         worker_count = min(Config.SHARED_AI_WORKERS, max(1, len(cameras)))
