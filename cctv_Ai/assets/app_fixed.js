@@ -179,7 +179,7 @@
     const pickerMenu = q('#cameraPickerMenu');
 
     const requestedPageSize = Number(size?.value || 2);
-    livePageSize = [2, 6, 10].includes(requestedPageSize) ? requestedPageSize : 2;
+    livePageSize = [2, 4, 6, 8, 10].includes(requestedPageSize) ? requestedPageSize : 2;
     recorderFilter = recorder?.value || '';
     cameraHealthFilter = health?.value || '';
 
@@ -227,7 +227,7 @@
     });
     size?.addEventListener('change', () => {
       const requested = Number(size.value);
-      livePageSize = [2, 6, 10].includes(requested) ? requested : 2;
+      livePageSize = [2, 4, 6, 8, 10].includes(requested) ? requested : 2;
       livePage = 1;
       applyCameraPage();
     });
