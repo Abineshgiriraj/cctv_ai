@@ -100,6 +100,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
         'reports' => ['reports.php', 'bi-bar-chart-line', 'Vehicle Reports'],
         'violations' => ['violations.php', 'bi-exclamation-triangle', 'Helmet Violations'],
         'road' => ['road_damage.php', 'bi-cone-striped', 'Road Damage'],
+        'incidents' => ['incidents.php', 'bi-exclamation-octagon', 'Incidents'],
     ];
     ?>
 <!doctype html>
@@ -163,7 +164,7 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app_fixed.js?v=4"></script>
+<script src="assets/app_fixed.js?v=5"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
