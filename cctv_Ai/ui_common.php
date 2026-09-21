@@ -139,7 +139,6 @@ function render_page_start(string $active, string $title, string $subtitle = '')
             <h1><?= e($title) ?></h1>
         </div>
         <div class="top-actions">
-            <div class="live-pill pending" id="systemLive"><i></i><span>CHECKING CAMERAS</span></div>
             <div class="avatar">CV</div>
         </div>
     </header>
@@ -164,7 +163,7 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app_fixed.js?v=8"></script>
+<script src="assets/app_fixed.js?v=9"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
