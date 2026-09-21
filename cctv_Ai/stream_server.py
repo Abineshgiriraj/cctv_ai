@@ -1330,11 +1330,14 @@ def live_detections():
         for key in keys:
             row = dict(ai_status.get(key) or default_ai_row())
             detected_at = row.get("detections_at")
+            helmet_at = row.get("helmet_detections_at")
             payload[key] = {
                 "detections": row.get("detections") or [],
+                "helmet_detections": row.get("helmet_detections") or [],
                 "source_width": int(row.get("source_width") or 0),
                 "source_height": int(row.get("source_height") or 0),
                 "age_seconds": None if detected_at is None else round(now - detected_at, 2),
+                "helmet_age_seconds": None if helmet_at is None else round(now - helmet_at, 2),
                 "revision": int(row.get("tracked_frames") or 0),
                 "last_inference_ms": row.get("last_inference_ms"),
                 "last_error": row.get("last_error"),
