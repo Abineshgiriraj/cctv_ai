@@ -147,7 +147,9 @@
     reachable,
     activeTotal = cameras.length,
     monitorAll = false,
-    monitoredTotal = cameras.length
+    monitoredTotal = cameras.length,
+    connectedTotal = 0,
+    aiProcessedTotal = 0
   ) {
     const total = cameras.length;
     const pill = q('#systemLive');
@@ -162,12 +164,16 @@
     }
 
     if (monitorAll) {
-      if (label) label.textContent = `MONITORING ALL ${monitoredTotal}`;
-      setText('activeCameraCount', `${monitoredTotal} / ${total}`);
-      setText('aiDetectionStatus', aiErrors ? 'AI WARNING' : 'ALL-CAMERA TRACKING');
+      if (label) label.textContent = `MONITORING ${connectedTotal}/${monitoredTotal}`;
+      if (connectedTotal < monitoredTotal) pill?.classList.add('pending');
+      setText('activeCameraCount', `${connectedTotal} / ${monitoredTotal}`);
+      setText(
+        'aiDetectionStatus',
+        aiErrors ? 'AI WARNING' : `AI ${aiProcessedTotal}/${monitoredTotal}`
+      );
       setText(
         'aiDetectionText',
-        `All ${monitoredTotal} cameras monitored in background · ${aiLiveCount}/${activeTotal} displayed AI feeds ready`
+        `All ${monitoredTotal} cameras are scheduled for background AI · ${connectedTotal} RTSP connected · ${aiProcessedTotal} AI processed`
       );
       return;
     }
@@ -235,7 +241,9 @@
         true,
         activeSet.size,
         !!data.monitor_all_cameras,
-        Number(data.monitored_total || cameras.length)
+        Number(data.monitored_total || cameras.length),
+        Number(data.connected_total || 0),
+        Number(data.ai_processed_total || 0)
       );
     } catch (err) {
       cameras.forEach((_, i) => setCameraState(i + 1, false, 'BACKEND OFFLINE'));
