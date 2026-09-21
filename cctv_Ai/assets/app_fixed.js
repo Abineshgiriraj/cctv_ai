@@ -141,7 +141,8 @@
         sourceHeight: 0,
         tracks: new Map(),
         lastPayloadAt: 0,
-        lastDetectionAge: null
+        lastDetectionAge: null,
+        lastRevision: -1
       });
     }
     return cameraOverlayStates.get(number);
@@ -166,6 +167,12 @@
     state.sourceHeight = Number(payload?.source_height || state.sourceHeight || 0);
     state.lastPayloadAt = now;
     state.lastDetectionAge = Number(payload?.age_seconds);
+
+    const revision = Number(payload?.revision ?? -1);
+    if (revision === state.lastRevision) {
+      return;
+    }
+    state.lastRevision = revision;
 
     const detections = Array.isArray(payload?.detections) ? payload.detections : [];
     const seen = new Set();
