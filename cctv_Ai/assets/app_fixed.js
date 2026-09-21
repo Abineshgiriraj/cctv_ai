@@ -420,7 +420,7 @@
   ) {
     const total = cameras.length;
     const pill = q('#systemLive');
-    const label = q('span', pill);
+    const label = pill ? q('span', pill) : null;
     pill?.classList.remove('offline', 'pending');
     if (!reachable) {
       pill?.classList.add('offline');
