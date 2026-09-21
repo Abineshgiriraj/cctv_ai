@@ -5,7 +5,7 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
 <section class="section-block" id="live-monitoring">
     <div class="camera-pagination-bar" id="cameraPagination">
         <div class="camera-pagination-summary">
-            <strong id="cameraPageSummary">Cameras 1-8</strong>
+            <strong id="cameraPageSummary">Cameras 1-4</strong>
             <span id="cameraPageConfigured"><?= count($cameras) ?> configured</span>
         </div>
         <div class="camera-pagination-actions">
@@ -99,7 +99,10 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
                 </div>
                 <div class="operator-camera-toolbar">
                     <div class="operator-mode-switch"><button type="button" class="active" id="aiMode<?= $num ?>" onclick="switchCameraMode(<?= $num ?>,'ai')"><i class="bi bi-bounding-box"></i> AI</button><button type="button" id="rawMode<?= $num ?>" onclick="switchCameraMode(<?= $num ?>,'raw')"><i class="bi bi-camera-video"></i> Raw</button></div>
-                    <button type="button" class="camera-action-btn" onclick="reconnectCamera(<?= $num ?>)"><i class="bi bi-arrow-clockwise"></i> Reconnect</button>
+                    <div class="camera-toolbar-actions">
+                        <button type="button" class="camera-action-btn" onclick="openCameraFocus(<?= $num ?>)"><i class="bi bi-arrows-fullscreen"></i> Expand</button>
+                        <button type="button" class="camera-action-btn" onclick="reconnectCamera(<?= $num ?>)"><i class="bi bi-arrow-clockwise"></i> Reconnect</button>
+                    </div>
                 </div>
                 <div class="camera-useful-stats">
                     <div><small>VISIBLE VEHICLES</small><b id="vehicleCount<?= $num ?>">0</b></div>
