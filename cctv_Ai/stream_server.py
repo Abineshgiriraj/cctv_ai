@@ -1338,6 +1338,7 @@ def live_detections():
                 "source_height": int(row.get("source_height") or 0),
                 "age_seconds": None if detected_at is None else round(now - detected_at, 2),
                 "helmet_age_seconds": None if helmet_at is None else round(now - helmet_at, 2),
+                "helmet_revision": 0 if helmet_at is None else float(helmet_at),
                 "revision": int(row.get("tracked_frames") or 0),
                 "last_inference_ms": row.get("last_inference_ms"),
                 "last_error": row.get("last_error"),
