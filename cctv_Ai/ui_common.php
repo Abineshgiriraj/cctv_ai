@@ -108,7 +108,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>CivicVision AI - <?= e($title) ?></title>
+    <title>CivicVision Nexus - <?= e($title) ?></title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -120,7 +120,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
 <aside class="sidebar">
     <div class="brand">
         <span class="brand-mark"><i class="bi bi-bounding-box-circles"></i></span>
-        <div><b>CIVICVISION</b><small>TRAFFIC AI</small></div>
+        <div><b>CIVICVISION NEXUS</b><small>AI VIDEO INTELLIGENCE</small></div>
     </div>
     <nav>
         <?php foreach ($items as $key => [$href, $icon, $label]): ?>
@@ -154,7 +154,7 @@ function render_page_end(array $extraScripts = []): void {
     global $cameras, $stream_base;
     ?>
     </section>
-    <footer>© <?= date('Y') ?> CivicVision AI · Municipal Video Intelligence Platform</footer>
+    <footer>© <?= date('Y') ?> CivicVision Nexus · Intelligent Video Analytics Platform</footer>
 </main>
 <script>
 window.CCTV_UI_CONFIG = {
@@ -163,7 +163,7 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/app_fixed.js?v=9"></script>
+<script src="assets/app_fixed.js?v=10"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
