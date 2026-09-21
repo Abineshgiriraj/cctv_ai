@@ -695,9 +695,15 @@ def active_cameras_api():
             return jsonify({"ok": False, "error": "camera_keys must be a list"}), 400
         active = set_active_cameras([str(key) for key in keys])
     else:
-        _ensure_initial_focus()
-        with lock:
-            active = list(active_camera_keys) if Config.PAGED_CAMERA_MODE else allowed_keys()
+        # Query-string mode avoids browser CORS/preflight problems between
+        # localhost (PHP) and 127.0.0.1:5000 (Flask).
+        raw_keys = (request.args.get("keys") or "").strip()
+        if raw_keys:
+            active = set_active_cameras([key for key in raw_keys.split(",") if key])
+        else:
+            _ensure_initial_focus()
+            with lock:
+                active = list(active_camera_keys) if Config.PAGED_CAMERA_MODE else allowed_keys()
     return jsonify({
         "ok": True,
         "paged_mode": Config.PAGED_CAMERA_MODE,

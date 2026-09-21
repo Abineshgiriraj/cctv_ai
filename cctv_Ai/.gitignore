@@ -14,3 +14,4 @@ data/*.sqlite3
 data/*.sqlite3-*
 
 data/evidence/
+data/nvr_channel_titles.json

@@ -12,10 +12,13 @@ from rider_verified_detector import RiderVerifiedDetector
 from road_report_routes import register_road_report_routes
 from config import Config
 from analytics_store import TrafficStore
+from incident_detector import IncidentDetector
 
 log = logging.getLogger("mjpeg-mysql")
 advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
+incidents = IncidentDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
 _advanced_lock = threading.Lock()
+_incident_lock = threading.Lock()
 _analytics_lock = threading.Lock()
 _analytics_last_error = None
 _analytics_last_attempt = 0.0
@@ -27,6 +30,8 @@ def _ensure_analytics_store(force=False):
     if base.traffic_store is not None:
         if advanced.store is not base.traffic_store:
             advanced.store = base.traffic_store
+        if incidents.store is not base.traffic_store:
+            incidents.store = base.traffic_store
         return base.traffic_store
 
     now = time.time()
@@ -36,12 +41,14 @@ def _ensure_analytics_store(force=False):
     with _analytics_lock:
         if base.traffic_store is not None:
             advanced.store = base.traffic_store
+            incidents.store = base.traffic_store
             return base.traffic_store
         _analytics_last_attempt = time.time()
         try:
             store = TrafficStore(Config.ANALYTICS_DB)
             base.traffic_store = store
             advanced.store = store
+            incidents.store = store
             _analytics_last_error = None
             log.info("MySQL analytics store connected/recovered")
             return store
@@ -188,7 +195,28 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
                 processed_index,
                 draw_frame=frame,
             )
-        base.set_ai_status(camera["camera_key"], advanced=summary)
+        incident_summary = {}
+        try:
+            incidents.store = store
+            with _incident_lock:
+                incident_summary = incidents.process(
+                    camera,
+                    clean_frame,
+                    result,
+                    processed_index,
+                    draw_frame=frame,
+                )
+        except Exception as incident_exc:
+            log.exception(
+                "Incident detection failed camera=%s: %s",
+                camera["camera_key"], incident_exc,
+            )
+            incident_summary = {"error": str(incident_exc)}
+        base.set_ai_status(
+            camera["camera_key"],
+            advanced=summary,
+            incidents=incident_summary,
+        )
     except Exception as exc:
         log.exception("Advanced detection failed camera=%s: %s", camera["camera_key"], exc)
         base.set_ai_status(camera["camera_key"], advanced={"error": str(exc)})
@@ -287,6 +315,66 @@ def violation_image(violation_id, image_type):
 register_road_report_routes(base.app, _ensure_analytics_store, base.allowed_keys, log)
 
 
+@base.app.route("/analytics/incidents")
+def incident_report():
+    store = _ensure_analytics_store()
+    if store is None:
+        return jsonify({
+            "ok": False,
+            "error": "MySQL analytics store is unavailable",
+            "detail": _analytics_last_error,
+        }), 503
+
+    today = datetime.now().date().isoformat()
+    from_date = (request.args.get("from_date") or today).strip()
+    to_date = (request.args.get("to_date") or from_date).strip()
+    camera_key = (request.args.get("camera_key") or "").strip() or None
+    incident_type = (request.args.get("incident_type") or "").strip() or None
+    try:
+        limit = int(request.args.get("limit", 100))
+    except ValueError:
+        limit = 100
+
+    if camera_key and camera_key not in base.allowed_keys():
+        return jsonify({"ok": False, "error": "Camera not configured"}), 404
+
+    try:
+        rows = store.recent_incidents(
+            limit=limit,
+            from_date=from_date,
+            to_date=to_date,
+            camera_key=camera_key,
+            incident_type=incident_type,
+        )
+        summary = {
+            "total": len(rows),
+            "accident": sum(1 for row in rows if row.get("incident_type") == "accident"),
+            "road_obstruction": sum(
+                1 for row in rows if row.get("incident_type") == "road_obstruction"
+            ),
+            "cameras": len({row.get("camera_key") for row in rows if row.get("camera_key")}),
+        }
+        return jsonify({"ok": True, "summary": summary, "events": rows})
+    except Exception as exc:
+        log.exception("Incident report failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@base.app.route("/analytics/incident_image/<int:incident_id>")
+def incident_image(incident_id):
+    store = _ensure_analytics_store()
+    if store is None:
+        return jsonify({
+            "ok": False,
+            "error": "MySQL analytics store is unavailable",
+            "detail": _analytics_last_error,
+        }), 503
+    image = store.incident_image(incident_id)
+    if not image:
+        return jsonify({"ok": False, "error": "Image not found"}), 404
+    return Response(image, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @base.app.route("/analytics/status")
 def analytics_status():
     store = _ensure_analytics_store()
@@ -307,6 +395,15 @@ def advanced_status():
         "helmet_observation_confidence": getattr(advanced, "helmet_observation_confidence", None),
         "road_tiled_inference": hasattr(advanced, "road_tile_columns"),
         "road_tile_columns": getattr(advanced, "road_tile_columns", None),
+    }
+    status["incident_detection"] = {
+        "enabled": Config.INCIDENT_DETECTION_ENABLED,
+        "accident_enabled": Config.ACCIDENT_DETECTION_ENABLED,
+        "accident_method": "YOLO/ByteTrack trajectory + proximity + sudden-stop",
+        "road_obstruction_fallback": Config.ROAD_OBSTRUCTION_FALLBACK_ENABLED,
+        "road_obstruction_method": "persistent fixed-camera foreground",
+        "requires_accident_pt": False,
+        "requires_obstruction_pt": False,
     }
     status = _json_safe(status)
     return jsonify({"ok": "runtime_error" not in status, "models": status})
