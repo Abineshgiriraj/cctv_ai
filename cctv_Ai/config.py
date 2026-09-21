@@ -85,6 +85,12 @@ class Config:
     CAMERA_USERNAME = os.getenv("CAMERA_USERNAME", "admin")
     CAMERA_PASSWORD = os.getenv("CAMERA_PASSWORD", "")
     CAMERA_SUBTYPE = int(os.getenv("CAMERA_SUBTYPE", 0))
+    CAMERA_CONNECT_STAGGER_SECONDS = max(
+        0.0, float(os.getenv("CAMERA_CONNECT_STAGGER_SECONDS", 0.15))
+    )
+    RTSP_RECONNECT_SECONDS = max(
+        1.0, float(os.getenv("RTSP_RECONNECT_SECONDS", 3.0))
+    )
 
     YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
 
@@ -104,6 +110,10 @@ class Config:
     AI_MAX_FPS = float(os.getenv("AI_MAX_FPS", 5))
     # Large NVR deployments should only open/process the cameras on the current UI page.
     PAGED_CAMERA_MODE = _bool("PAGED_CAMERA_MODE", True)
+    # When enabled, every configured camera keeps RTSP capture + background AI
+    # monitoring active. Pagination only controls which feeds are shown in the UI.
+    MONITOR_ALL_CAMERAS = _bool("MONITOR_ALL_CAMERAS", False)
+    SHARED_AI_WORKERS = max(1, min(4, int(os.getenv("SHARED_AI_WORKERS", 1))))
     ACTIVE_CAMERA_LIMIT = max(1, min(16, int(os.getenv("ACTIVE_CAMERA_LIMIT", 8))))
     AI_MODEL_IDLE_UNLOAD_SECONDS = max(2.0, float(os.getenv("AI_MODEL_IDLE_UNLOAD_SECONDS", 15)))
     YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", 640))

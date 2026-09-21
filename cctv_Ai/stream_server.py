@@ -72,12 +72,20 @@ def _ensure_initial_focus():
             focus_initialized = True
 
 
-def is_camera_active(camera_key: str) -> bool:
+def is_camera_focused(camera_key: str) -> bool:
+    """Whether a camera belongs to the currently displayed UI page."""
     if not Config.PAGED_CAMERA_MODE:
         return True
     _ensure_initial_focus()
     with lock:
         return camera_key in active_camera_keys
+
+
+def is_camera_active(camera_key: str) -> bool:
+    """Whether RTSP/background monitoring should remain active."""
+    if Config.MONITOR_ALL_CAMERAS:
+        return True
+    return is_camera_focused(camera_key)
 
 
 def set_active_cameras(keys):
@@ -180,8 +188,10 @@ def set_ai_status(camera_key: str, **fields):
 def capture_stream(camera: dict):
     camera_key = camera["camera_key"]
     camera_ip = camera["camera_ip"]
-    """Open RTSP only while this camera is active in the paged Live UI."""
-    reconnect_delay = 3
+    """Keep RTSP open for every camera when MONITOR_ALL_CAMERAS is enabled."""
+    reconnect_delay = Config.RTSP_RECONNECT_SECONDS + (
+        int(camera.get("channel_no") or 1) % 5
+    ) * 0.35
 
     while True:
         if not is_camera_active(camera_key):
@@ -236,6 +246,27 @@ def capture_stream(camera: dict):
                 continue
 
             fail_reads = 0
+
+            # Every camera keeps its latest OpenCV frame for background AI.
+            # MJPEG encoding is only needed for cameras currently visible in the UI,
+            # which avoids encoding 98 streams continuously.
+            with lock:
+                latest_cv_frames[camera_key] = frame
+                frame_sequence[camera_key] = int(frame_sequence.get(camera_key) or 0) + 1
+                row = camera_status.setdefault(camera_key, {})
+                row["connected"] = True
+                row["standby"] = False
+                row["frames"] = int(row.get("frames") or 0) + 1
+                row["last_frame_at"] = time.time()
+                row["last_error"] = None
+
+            if Config.MONITOR_ALL_CAMERAS and not is_camera_focused(camera_key):
+                with lock:
+                    output_frames.pop(camera_key, None)
+                    row = camera_status.setdefault(camera_key, {})
+                    row["last_jpeg_bytes"] = 0
+                continue
+
             ok, encoded = cv2.imencode(
                 ".jpg",
                 frame,
@@ -256,16 +287,8 @@ def capture_stream(camera: dict):
 
             with lock:
                 output_frames[camera_key] = jpeg
-                latest_cv_frames[camera_key] = frame
-                frame_sequence[camera_key] = int(frame_sequence.get(camera_key) or 0) + 1
-
                 row = camera_status.setdefault(camera_key, {})
-                row["connected"] = True
-                row["standby"] = False
-                row["frames"] = int(row.get("frames") or 0) + 1
                 row["last_jpeg_bytes"] = len(jpeg)
-                row["last_frame_at"] = time.time()
-                row["last_error"] = None
 
         cap.release()
         if not is_camera_active(camera_key):
@@ -408,6 +431,306 @@ def _maybe_count_object(camera: dict, state, *, track_id, cls_id, vehicle_type,
         confidence,
         stored,
     )
+
+
+
+class _ScalarValue:
+    def __init__(self, value):
+        self.value = value
+
+    def __getitem__(self, _index):
+        return self
+
+    def item(self):
+        return self.value
+
+
+class _VectorValue:
+    def __init__(self, values):
+        self.values = list(values)
+
+    def __getitem__(self, _index):
+        return self
+
+    def tolist(self):
+        return list(self.values)
+
+
+class _TrackedBox:
+    def __init__(self, cls_id, confidence, xyxy, track_id):
+        self.cls = _ScalarValue(int(cls_id))
+        self.conf = _ScalarValue(float(confidence))
+        self.xyxy = _VectorValue(xyxy)
+        self.id = _ScalarValue(int(track_id)) if track_id is not None else None
+
+
+class _TrackedResult:
+    def __init__(self, boxes):
+        self.boxes = boxes
+
+
+def _box_iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
+    return inter / (area_a + area_b - inter)
+
+
+class _SimpleCameraTracker:
+    """Lightweight per-camera tracker for shared-model monitoring.
+
+    It preserves local track IDs using class + IoU/center matching. This lets one
+    shared YOLO model monitor many feeds without ByteTrack state leaking from one
+    camera into another.
+    """
+
+    def __init__(self):
+        self.next_id = 1
+        self.frame_index = 0
+        self.tracks = {}
+
+    @staticmethod
+    def _center(box):
+        x1, y1, x2, y2 = box
+        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    @staticmethod
+    def _diag(box):
+        x1, y1, x2, y2 = box
+        return max(1.0, ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+
+    def update(self, result):
+        self.frame_index += 1
+        detections = []
+        boxes = getattr(result, "boxes", None)
+        if boxes is not None:
+            for box in boxes:
+                try:
+                    cls_id = int(box.cls[0].item())
+                    confidence = float(box.conf[0].item())
+                    xyxy = [float(v) for v in box.xyxy[0].tolist()]
+                except Exception:
+                    continue
+                detections.append({
+                    "cls_id": cls_id,
+                    "confidence": confidence,
+                    "box": xyxy,
+                })
+
+        assigned_tracks = set()
+        tracked_boxes = []
+
+        for detection in sorted(detections, key=lambda row: row["confidence"], reverse=True):
+            cls_id = detection["cls_id"]
+            box = detection["box"]
+            center = self._center(box)
+            best = None
+
+            for track_id, track in self.tracks.items():
+                if track_id in assigned_tracks or track["cls_id"] != cls_id:
+                    continue
+                if self.frame_index - track["last_seen"] > 8:
+                    continue
+
+                iou = _box_iou(box, track["box"])
+                old_center = self._center(track["box"])
+                distance = ((center[0] - old_center[0]) ** 2 + (center[1] - old_center[1]) ** 2) ** 0.5
+                distance_limit = max(self._diag(box), self._diag(track["box"])) * 1.25
+                if iou < 0.05 and distance > distance_limit:
+                    continue
+
+                score = iou * 2.0 - (distance / max(1.0, distance_limit))
+                if best is None or score > best[0]:
+                    best = (score, track_id)
+
+            if best is None:
+                track_id = self.next_id
+                self.next_id += 1
+            else:
+                track_id = best[1]
+
+            assigned_tracks.add(track_id)
+            self.tracks[track_id] = {
+                "cls_id": cls_id,
+                "box": box,
+                "last_seen": self.frame_index,
+            }
+            tracked_boxes.append(
+                _TrackedBox(cls_id, detection["confidence"], box, track_id)
+            )
+
+        stale = [
+            track_id
+            for track_id, track in self.tracks.items()
+            if self.frame_index - track["last_seen"] > 12
+        ]
+        for track_id in stale:
+            self.tracks.pop(track_id, None)
+
+        return _TrackedResult(tracked_boxes)
+
+
+def shared_ai_worker(worker_id: int, cameras):
+    """Continuously monitor a camera partition with one shared YOLO model."""
+    try:
+        from ultralytics import YOLO
+        model = YOLO(Config.YOLO_MODEL)
+    except Exception as exc:
+        log.exception("Shared AI worker %s failed to load model: %s", worker_id, exc)
+        for camera in cameras:
+            set_ai_status(
+                camera["camera_key"],
+                model_loaded=False,
+                last_error=f"YOLO model load failed: {exc}",
+                last_error_at=time.time(),
+            )
+        return
+
+    log.info(
+        "Shared AI worker %s ready cameras=%s",
+        worker_id,
+        [camera["camera_key"] for camera in cameras],
+    )
+
+    min_interval = 1.0 / max(Config.AI_MAX_FPS, 0.05)
+    states = {}
+    for camera in cameras:
+        key = camera["camera_key"]
+        state = {
+            "last_seq": -1,
+            "last_started": 0.0,
+            "history": defaultdict(lambda: deque(maxlen=Config.TRACK_TRAIL_LENGTH)),
+            "last_seen": {},
+            "processed_index": 0,
+            "count_state": _new_traffic_state(),
+            "tracker": _SimpleCameraTracker(),
+        }
+        states[key] = state
+        with lock:
+            traffic_state[key] = state["count_state"]
+        set_ai_status(
+            key,
+            enabled=True,
+            model_loaded=True,
+            last_error=None,
+            monitor_mode="shared_all_cameras",
+        )
+
+    while True:
+        did_work = False
+        ordered_cameras = sorted(
+            cameras,
+            key=lambda camera: 0 if is_camera_focused(camera["camera_key"]) else 1,
+        )
+        for camera in ordered_cameras:
+            camera_key = camera["camera_key"]
+            state = states[camera_key]
+
+            with lock:
+                frame = latest_cv_frames.get(camera_key)
+                seq = int(frame_sequence.get(camera_key) or 0)
+
+            if frame is None or seq == state["last_seq"]:
+                continue
+            if time.time() - state["last_started"] < min_interval:
+                continue
+
+            did_work = True
+            state["last_seq"] = seq
+            state["last_started"] = time.time()
+            work = frame.copy()
+            started = time.perf_counter()
+
+            try:
+                results = model.predict(
+                    source=work,
+                    classes=Config.TARGET_CLASSES,
+                    conf=Config.CONFIDENCE_THRESHOLD,
+                    iou=Config.IOU_THRESHOLD,
+                    imgsz=Config.YOLO_IMGSZ,
+                    device=Config.YOLO_DEVICE or None,
+                    verbose=False,
+                )
+                inference_ms = (time.perf_counter() - started) * 1000.0
+                state["processed_index"] += 1
+
+                raw_result = results[0] if results else None
+                result = state["tracker"].update(raw_result) if raw_result is not None else None
+
+                if result is not None:
+                    persons, vehicles, class_counts = _annotate_tracking(
+                        camera,
+                        work,
+                        result,
+                        model,
+                        state["history"],
+                        state["last_seen"],
+                        state["processed_index"],
+                        inference_ms,
+                        state["count_state"],
+                    )
+                else:
+                    persons, vehicles, class_counts = 0, 0, {}
+                    _draw_count_line(work, int(work.shape[0] * Config.COUNT_LINE_Y_RATIO))
+                    _draw_summary(
+                        work,
+                        persons,
+                        vehicles,
+                        inference_ms,
+                        state["count_state"]["session_total"],
+                    )
+
+                jpeg = None
+                if is_camera_focused(camera_key):
+                    ok, encoded = cv2.imencode(
+                        ".jpg",
+                        work,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), Config.JPEG_QUALITY],
+                    )
+                    if not ok:
+                        raise RuntimeError("AI JPEG encode failed")
+                    jpeg = encoded.tobytes()
+
+                now = time.time()
+                with lock:
+                    if jpeg is not None:
+                        tracked_frames[camera_key] = jpeg
+                    else:
+                        tracked_frames.pop(camera_key, None)
+                    row = ai_status.setdefault(camera_key, default_ai_row())
+                    row["model_loaded"] = True
+                    row["monitor_mode"] = "shared_all_cameras"
+                    row["tracked_frames"] = int(row.get("tracked_frames") or 0) + 1
+                    row["last_jpeg_bytes"] = len(jpeg) if jpeg is not None else 0
+                    row["last_processed_at"] = now
+                    row["last_inference_ms"] = round(inference_ms, 1)
+                    row["last_error"] = None
+                    row["persons"] = persons
+                    row["vehicles"] = vehicles
+                    row["objects"] = persons + vehicles
+                    row["class_counts"] = class_counts
+                    row["session_vehicle_counts"] = dict(state["count_state"]["session_counts"])
+                    row["session_vehicle_total"] = int(state["count_state"]["session_total"])
+
+            except Exception as exc:
+                msg = f"Shared AI inference failed: {exc}"
+                log.exception("%s camera=%s", msg, camera_key)
+                set_ai_status(
+                    camera_key,
+                    model_loaded=True,
+                    last_error=msg,
+                    last_error_at=time.time(),
+                )
+
+        if not did_work:
+            time.sleep(0.02)
 
 
 def _annotate_tracking(camera, frame, result, model, history, last_seen,
@@ -707,8 +1030,10 @@ def active_cameras_api():
     return jsonify({
         "ok": True,
         "paged_mode": Config.PAGED_CAMERA_MODE,
+        "monitor_all_cameras": Config.MONITOR_ALL_CAMERAS,
         "limit": Config.ACTIVE_CAMERA_LIMIT,
         "active_camera_keys": active,
+        "monitored_total": len(allowed_keys()) if Config.MONITOR_ALL_CAMERAS else len(active),
         "configured_total": len(allowed_keys()),
     })
 
@@ -725,7 +1050,8 @@ def health():
             ai_last = ai.get("last_processed_at")
             cameras[key] = {
                 "connected": bool(st.get("connected")),
-                "active": is_camera_active(key),
+                "active": is_camera_focused(key),
+                "monitored": is_camera_active(key),
                 "standby": bool(st.get("standby")),
                 "frames": int(st.get("frames") or 0),
                 "last_jpeg_bytes": int(st.get("last_jpeg_bytes") or 0),
@@ -750,8 +1076,25 @@ def health():
                 },
             }
 
-    live = all(c["has_frame"] for c in cameras.values()) if cameras else False
-    ai_live = all(c["ai"]["has_frame"] for c in cameras.values()) if cameras else False
+    if Config.MONITOR_ALL_CAMERAS:
+        monitored_rows = [row for row in cameras.values() if row.get("monitored")]
+        connected_total = sum(1 for row in monitored_rows if row.get("connected"))
+        ai_processed_total = sum(
+            1
+            for row in monitored_rows
+            if row.get("ai", {}).get("age_seconds") is not None
+            and not row.get("ai", {}).get("last_error")
+        )
+        live = connected_total == len(monitored_rows) if monitored_rows else False
+        ai_live = ai_processed_total == len(monitored_rows) if monitored_rows else False
+    else:
+        connected_total = sum(1 for row in cameras.values() if row.get("connected"))
+        ai_processed_total = sum(
+            1 for row in cameras.values()
+            if row.get("ai", {}).get("age_seconds") is not None
+        )
+        live = all(c["has_frame"] for c in cameras.values()) if cameras else False
+        ai_live = all(c["ai"]["has_frame"] for c in cameras.values()) if cameras else False
 
     today_counts = None
     if traffic_store is not None:
@@ -768,6 +1111,11 @@ def health():
         "ok": live,
         "ai_ok": ai_live,
         "paged_mode": Config.PAGED_CAMERA_MODE,
+        "monitor_all_cameras": Config.MONITOR_ALL_CAMERAS,
+        "monitored_total": len(allowed_keys()) if Config.MONITOR_ALL_CAMERAS else len(active_list),
+        "connected_total": connected_total,
+        "ai_processed_total": ai_processed_total,
+        "shared_ai_workers": Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
         "active_camera_keys": active_list,
         "active_camera_limit": Config.ACTIVE_CAMERA_LIMIT,
         "configured_total": len(allowed_keys()),
@@ -891,22 +1239,44 @@ def tracked_feed(camera_key):
 if __name__ == "__main__":
     cameras = Config.CAMERAS
 
-    # Start the original capture threads first.
     for cam in cameras:
         camera_key = cam["camera_key"]
-        t = threading.Thread(target=capture_stream, args=(cam,), daemon=True, name=f"capture-{camera_key}")
-        t.start()
+        threading.Thread(
+            target=capture_stream,
+            args=(cam,),
+            daemon=True,
+            name=f"capture-{camera_key}",
+        ).start()
+        if Config.CAMERA_CONNECT_STAGGER_SECONDS:
+            time.sleep(Config.CAMERA_CONNECT_STAGGER_SECONDS)
 
-    # AI workers consume latest_cv_frames from those capture threads. There is one
-    # tracker/model instance per camera so ByteTrack IDs cannot leak across feeds.
-    for cam in cameras:
-        camera_key = cam["camera_key"]
-        t = threading.Thread(target=ai_tracking_worker, args=(cam,), daemon=True, name=f"ai-{camera_key}")
-        t.start()
+    if Config.MONITOR_ALL_CAMERAS:
+        worker_count = min(Config.SHARED_AI_WORKERS, max(1, len(cameras)))
+        partitions = [cameras[index::worker_count] for index in range(worker_count)]
+        for worker_id, partition in enumerate(partitions, start=1):
+            if not partition:
+                continue
+            threading.Thread(
+                target=shared_ai_worker,
+                args=(worker_id, partition),
+                daemon=True,
+                name=f"shared-ai-{worker_id}",
+            ).start()
+    else:
+        for cam in cameras:
+            camera_key = cam["camera_key"]
+            threading.Thread(
+                target=ai_tracking_worker,
+                args=(cam,),
+                daemon=True,
+                name=f"ai-{camera_key}",
+            ).start()
 
     log.info(
-        "Starting MJPEG + YOLO/ByteTrack server on 0.0.0.0:5000 cameras=%s ai_fps=%s counting=%s line=%.2f",
-        cameras,
+        "Starting MJPEG AI server cameras=%s monitor_all=%s shared_workers=%s ai_fps=%s counting=%s line=%.2f",
+        len(cameras),
+        Config.MONITOR_ALL_CAMERAS,
+        Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
         Config.AI_MAX_FPS,
         Config.COUNTING_ENABLED,
         Config.COUNT_LINE_Y_RATIO,

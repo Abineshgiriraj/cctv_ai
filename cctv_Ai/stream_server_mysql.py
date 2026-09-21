@@ -412,6 +412,8 @@ def advanced_status():
 if __name__ == "__main__":
     cameras = Config.CAMERAS
 
+    # RTSP capture remains active for every configured camera when
+    # MONITOR_ALL_CAMERAS=1. UI pagination no longer stops monitoring.
     for cam in cameras:
         threading.Thread(
             target=base.capture_stream,
@@ -419,18 +421,35 @@ if __name__ == "__main__":
             daemon=True,
             name=f"capture-{cam['camera_key']}",
         ).start()
+        if Config.CAMERA_CONNECT_STAGGER_SECONDS:
+            time.sleep(Config.CAMERA_CONNECT_STAGGER_SECONDS)
 
-    for cam in cameras:
-        threading.Thread(
-            target=base.ai_tracking_worker,
-            args=(cam,),
-            daemon=True,
-            name=f"ai-{cam['camera_key']}",
-        ).start()
+    if Config.MONITOR_ALL_CAMERAS:
+        worker_count = min(Config.SHARED_AI_WORKERS, max(1, len(cameras)))
+        partitions = [cameras[index::worker_count] for index in range(worker_count)]
+        for worker_id, partition in enumerate(partitions, start=1):
+            if not partition:
+                continue
+            threading.Thread(
+                target=base.shared_ai_worker,
+                args=(worker_id, partition),
+                daemon=True,
+                name=f"shared-ai-{worker_id}",
+            ).start()
+    else:
+        for cam in cameras:
+            threading.Thread(
+                target=base.ai_tracking_worker,
+                args=(cam,),
+                daemon=True,
+                name=f"ai-{cam['camera_key']}",
+            ).start()
 
     log.info(
-        "Starting CCTV backend with MySQL analytics cameras=%s db=%s@%s:%s/%s",
-        [cam["camera_key"] for cam in cameras],
+        "Starting CCTV backend cameras=%s monitor_all=%s shared_workers=%s db=%s@%s:%s/%s",
+        len(cameras),
+        Config.MONITOR_ALL_CAMERAS,
+        Config.SHARED_AI_WORKERS if Config.MONITOR_ALL_CAMERAS else 0,
         Config.DB_USER,
         Config.DB_HOST,
         Config.DB_PORT,
