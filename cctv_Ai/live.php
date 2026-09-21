@@ -69,7 +69,9 @@ render_page_start('live', 'Live Monitoring', 'Live AI and raw camera streams wit
             <label for="cameraPageSize">Show</label>
             <select id="cameraPageSize" aria-label="Cameras to access and display at the same time">
                 <option value="2" selected>2 cameras</option>
+                <option value="4">4 cameras</option>
                 <option value="6">6 cameras</option>
+                <option value="8">8 cameras</option>
                 <option value="10">10 cameras</option>
             </select>
             <button type="button" id="cameraPrevPage"><i class="bi bi-chevron-left"></i> Previous</button>
