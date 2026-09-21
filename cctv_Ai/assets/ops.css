@@ -255,9 +255,9 @@ body { background: #06101a; }
   z-index:3;
 }
 .camera-ai-overlay.hidden { display:none; }
-.operator-camera-frame .camera-overlay-top { position:absolute; inset:10px 12px auto; display:flex; justify-content:space-between; pointer-events:none; }
+.operator-camera-frame .camera-overlay-top { position:absolute; inset:10px 12px auto; display:flex; justify-content:space-between; pointer-events:none; z-index:4; }
 .operator-camera-frame .camera-overlay-top span { background:rgba(3,10,17,.78); color:#eaf6ff; padding:5px 8px; border-radius:8px; font-size:11px; }
-.operator-camera-frame .stream-message { position:absolute; inset:0; display:grid; place-content:center; text-align:center; background:#07111c; color:#a9bed1; gap:6px; }
+.operator-camera-frame .stream-message { position:absolute; inset:0; display:grid; place-content:center; text-align:center; background:#07111c; color:#a9bed1; gap:6px; z-index:5; }
 .operator-camera-frame .stream-message.hidden { display:none; }
 
 .operator-camera-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px; border-top:1px solid rgba(255,255,255,.04); }
