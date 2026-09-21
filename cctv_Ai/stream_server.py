@@ -244,6 +244,27 @@ def capture_stream(camera: dict):
                 continue
 
             fail_reads = 0
+
+            # Every camera keeps its latest OpenCV frame for background AI.
+            # MJPEG encoding is only needed for cameras currently visible in the UI,
+            # which avoids encoding 98 streams continuously.
+            with lock:
+                latest_cv_frames[camera_key] = frame
+                frame_sequence[camera_key] = int(frame_sequence.get(camera_key) or 0) + 1
+                row = camera_status.setdefault(camera_key, {})
+                row["connected"] = True
+                row["standby"] = False
+                row["frames"] = int(row.get("frames") or 0) + 1
+                row["last_frame_at"] = time.time()
+                row["last_error"] = None
+
+            if Config.MONITOR_ALL_CAMERAS and not is_camera_focused(camera_key):
+                with lock:
+                    output_frames.pop(camera_key, None)
+                    row = camera_status.setdefault(camera_key, {})
+                    row["last_jpeg_bytes"] = 0
+                continue
+
             ok, encoded = cv2.imencode(
                 ".jpg",
                 frame,
@@ -264,16 +285,8 @@ def capture_stream(camera: dict):
 
             with lock:
                 output_frames[camera_key] = jpeg
-                latest_cv_frames[camera_key] = frame
-                frame_sequence[camera_key] = int(frame_sequence.get(camera_key) or 0) + 1
-
                 row = camera_status.setdefault(camera_key, {})
-                row["connected"] = True
-                row["standby"] = False
-                row["frames"] = int(row.get("frames") or 0) + 1
                 row["last_jpeg_bytes"] = len(jpeg)
-                row["last_frame_at"] = time.time()
-                row["last_error"] = None
 
         cap.release()
         if not is_camera_active(camera_key):
@@ -610,7 +623,11 @@ def shared_ai_worker(worker_id: int, cameras):
 
     while True:
         did_work = False
-        for camera in cameras:
+        ordered_cameras = sorted(
+            cameras,
+            key=lambda camera: 0 if is_camera_focused(camera["camera_key"]) else 1,
+        )
+        for camera in ordered_cameras:
             camera_key = camera["camera_key"]
             state = states[camera_key]
 
@@ -668,23 +685,28 @@ def shared_ai_worker(worker_id: int, cameras):
                         state["count_state"]["session_total"],
                     )
 
-                ok, encoded = cv2.imencode(
-                    ".jpg",
-                    work,
-                    [int(cv2.IMWRITE_JPEG_QUALITY), Config.JPEG_QUALITY],
-                )
-                if not ok:
-                    raise RuntimeError("AI JPEG encode failed")
+                jpeg = None
+                if is_camera_focused(camera_key):
+                    ok, encoded = cv2.imencode(
+                        ".jpg",
+                        work,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), Config.JPEG_QUALITY],
+                    )
+                    if not ok:
+                        raise RuntimeError("AI JPEG encode failed")
+                    jpeg = encoded.tobytes()
 
-                jpeg = encoded.tobytes()
                 now = time.time()
                 with lock:
-                    tracked_frames[camera_key] = jpeg
+                    if jpeg is not None:
+                        tracked_frames[camera_key] = jpeg
+                    else:
+                        tracked_frames.pop(camera_key, None)
                     row = ai_status.setdefault(camera_key, default_ai_row())
                     row["model_loaded"] = True
                     row["monitor_mode"] = "shared_all_cameras"
                     row["tracked_frames"] = int(row.get("tracked_frames") or 0) + 1
-                    row["last_jpeg_bytes"] = len(jpeg)
+                    row["last_jpeg_bytes"] = len(jpeg) if jpeg is not None else 0
                     row["last_processed_at"] = now
                     row["last_inference_ms"] = round(inference_ms, 1)
                     row["last_error"] = None
