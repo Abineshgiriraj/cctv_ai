@@ -188,12 +188,15 @@ def _pop_latest_task(target):
     with _analysis_task_condition:
         while not target:
             _analysis_task_condition.wait(timeout=0.5)
-        # Prefer the oldest camera waiting, while still storing only its newest
-        # frame. This bounds memory and prevents a busy camera from starving
-        # every other camera.
+        # Focused cameras get first priority so helmet/no-helmet and incident
+        # checks remain responsive on the feeds the operator is viewing. Within
+        # each priority group, process the oldest waiting camera.
         camera_key, task = min(
             target.items(),
-            key=lambda item: item[1]["queued_at"],
+            key=lambda item: (
+                0 if base.is_camera_focused(item[0]) else 1,
+                item[1]["queued_at"],
+            ),
         )
         target.pop(camera_key, None)
         return task
@@ -216,7 +219,13 @@ def _advanced_analysis_loop():
                     task["processed_index"],
                     draw_frame=None,
                 )
-            base.set_ai_status(camera["camera_key"], advanced=summary)
+            helmet_live = summary.get("helmet_live") or []
+            base.set_ai_status(
+                camera["camera_key"],
+                advanced=summary,
+                helmet_detections=helmet_live,
+                helmet_detections_at=time.time(),
+            )
         except Exception as exc:
             log.exception(
                 "Async advanced detection failed camera=%s: %s",
@@ -535,9 +544,17 @@ if __name__ == "__main__":
                 continue
             threading.Thread(
                 target=base.shared_ai_worker,
-                args=(worker_id, partition),
+                args=(worker_id, partition, Config.FOREGROUND_BYTETRACK_ENABLED),
                 daemon=True,
                 name=f"shared-ai-{worker_id}",
+            ).start()
+
+        if Config.FOREGROUND_BYTETRACK_ENABLED:
+            threading.Thread(
+                target=base.foreground_tracker_manager,
+                args=(cameras,),
+                daemon=True,
+                name="foreground-bytetrack-manager",
             ).start()
     else:
         for cam in cameras:
