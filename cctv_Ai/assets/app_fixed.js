@@ -9,6 +9,9 @@
   let livePageSize = 4;
   let visibleCameraKeys = [];
   let recorderFilter = '';
+  let cameraHealthFilter = '';
+  const selectedCameraKeys = new Set();
+  let latestHealthData = null;
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
   const fmt = (value) => Number(value || 0).toLocaleString('en-IN');
@@ -20,8 +23,71 @@
 
   const cameraCard = (number) => q(`.operator-camera-card[data-camera-number="${number}"]`);
 
-  function filteredCameras() {
-    return recorderFilter ? cameras.filter(cam => cam.ip === recorderFilter) : cameras;
+  function cameraMatchesHealth(cam) {
+    if (!cameraHealthFilter || !latestHealthData) return true;
+    const st = latestHealthData?.cameras?.[cam.camera_key] || {};
+    const ai = st?.ai || {};
+    if (cameraHealthFilter === 'online') return !!st.connected;
+    if (cameraHealthFilter === 'offline') return !st.connected;
+    if (cameraHealthFilter === 'ai_ready') {
+      return ai.age_seconds !== null && ai.age_seconds !== undefined && !ai.last_error;
+    }
+    if (cameraHealthFilter === 'ai_error') return !!ai.last_error;
+    return true;
+  }
+
+  function filteredCameras({ignoreSelection = false} = {}) {
+    return cameras.filter(cam => {
+      if (recorderFilter && cam.ip !== recorderFilter) return false;
+      if (!cameraMatchesHealth(cam)) return false;
+      if (!ignoreSelection && selectedCameraKeys.size && !selectedCameraKeys.has(cam.camera_key)) return false;
+      return true;
+    });
+  }
+
+  function updateCameraPickerLabel() {
+    const count = selectedCameraKeys.size;
+    setText('cameraPickerLabel', count ? `${count} selected` : 'Select cameras');
+    setText(
+      'cameraSelectionCount',
+      count ? `${count} camera${count === 1 ? '' : 's'} selected` : '0 selected · showing normal camera list'
+    );
+  }
+
+  function updatePickerHealth() {
+    qa('.camera-picker-item').forEach(item => {
+      const key = item.dataset.cameraKey;
+      const st = latestHealthData?.cameras?.[key] || {};
+      item.classList.toggle('is-online', !!st.connected);
+      item.classList.toggle('is-offline', !!latestHealthData && !st.connected);
+      item.classList.toggle('has-ai-error', !!st?.ai?.last_error);
+      item.dataset.health = st.connected ? 'online' : (latestHealthData ? 'offline' : 'unknown');
+    });
+  }
+
+  function applyPickerSearch() {
+    const term = (q('#cameraPickerSearch')?.value || '').trim().toLowerCase();
+    qa('.camera-picker-item').forEach(item => {
+      const key = item.dataset.cameraKey;
+      const cam = cameras.find(row => row.camera_key === key);
+      const allowedByRecorder = !recorderFilter || cam?.ip === recorderFilter;
+      const allowedByHealth = cam ? cameraMatchesHealth(cam) : true;
+      const allowedBySearch = !term || (item.dataset.search || '').includes(term);
+      item.classList.toggle('picker-item-hidden', !(allowedByRecorder && allowedByHealth && allowedBySearch));
+    });
+  }
+
+  function setCameraSelection(keys) {
+    selectedCameraKeys.clear();
+    keys.forEach(key => {
+      if (cameras.some(cam => cam.camera_key === key)) selectedCameraKeys.add(key);
+    });
+    qa('#cameraPickerList input[type="checkbox"]').forEach(input => {
+      input.checked = selectedCameraKeys.has(input.value);
+    });
+    updateCameraPickerLabel();
+    livePage = 1;
+    applyCameraPage();
   }
 
   function pageCameraRows() {
@@ -88,8 +154,10 @@
     });
 
     const prefix = recorderFilter ? `${recorderFilter} · ` : '';
-    setText('cameraPageSummary', rows.length ? `${prefix}Cameras ${start + 1}-${end}` : `${prefix}No cameras`);
-    setText('cameraPageConfigured', recorderFilter ? `${rows.length} on recorder · ${cameras.length} total` : `${cameras.length} configured`);
+    const selectionText = selectedCameraKeys.size ? ` · ${selectedCameraKeys.size} selected` : '';
+    const healthText = cameraHealthFilter ? ` · ${cameraHealthFilter.replace('_', ' ')}` : '';
+    setText('cameraPageSummary', rows.length ? `${prefix}Cameras ${start + 1}-${end}${selectionText}${healthText}` : `${prefix}No cameras match filters`);
+    setText('cameraPageConfigured', `${rows.length} displayed by filters · ${cameras.length} total configured`);
     setText('cameraPageLabel', `Page ${livePage} / ${totalPages}`);
     const prev = q('#cameraPrevPage');
     const next = q('#cameraNextPage');
@@ -103,11 +171,55 @@
     if (!q('#cameraPagination')) return;
     const size = q('#cameraPageSize');
     const recorder = q('#cameraRecorderFilter');
+    const health = q('#cameraHealthFilter');
+    const picker = q('#cameraPicker');
+    const pickerToggle = q('#cameraPickerToggle');
+    const pickerMenu = q('#cameraPickerMenu');
+
     livePageSize = Number(size?.value || 8) === 4 ? 4 : 8;
     recorderFilter = recorder?.value || '';
+    cameraHealthFilter = health?.value || '';
+
+    pickerToggle?.addEventListener('click', e => {
+      e.stopPropagation();
+      const open = picker?.classList.toggle('open');
+      pickerToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) {
+        applyPickerSearch();
+        q('#cameraPickerSearch')?.focus();
+      }
+    });
+    pickerMenu?.addEventListener('click', e => e.stopPropagation());
+    document.addEventListener('click', () => {
+      picker?.classList.remove('open');
+      pickerToggle?.setAttribute('aria-expanded', 'false');
+    });
+
+    q('#cameraPickerSearch')?.addEventListener('input', applyPickerSearch);
+    q('#cameraPickerList')?.addEventListener('change', e => {
+      const input = e.target.closest('input[type="checkbox"]');
+      if (!input) return;
+      if (input.checked) selectedCameraKeys.add(input.value);
+      else selectedCameraKeys.delete(input.value);
+      updateCameraPickerLabel();
+      livePage = 1;
+      applyCameraPage();
+    });
+    q('#cameraSelectVisible')?.addEventListener('click', () => {
+      const keys = qa('.camera-picker-item:not(.picker-item-hidden) input[type="checkbox"]').map(input => input.value);
+      setCameraSelection(keys);
+    });
+    q('#cameraClearSelection')?.addEventListener('click', () => setCameraSelection([]));
     recorder?.addEventListener('change', () => {
       recorderFilter = recorder.value || '';
       livePage = 1;
+      applyPickerSearch();
+      applyCameraPage();
+    });
+    health?.addEventListener('change', () => {
+      cameraHealthFilter = health.value || '';
+      livePage = 1;
+      applyPickerSearch();
       applyCameraPage();
     });
     size?.addEventListener('change', () => {
@@ -132,9 +244,156 @@
   }
 
 
+  function ensureCameraFocusModal() {
+    let modal = q('#cameraFocusModal');
+    if (modal) return modal;
+
+    modal = document.createElement('div');
+    modal.className = 'camera-focus-modal';
+    modal.id = 'cameraFocusModal';
+    modal.innerHTML = `
+      <div class="camera-focus-shell" role="dialog" aria-modal="true" aria-label="Camera live view">
+        <div class="camera-focus-head">
+          <span class="live-dot"></span>
+          <div class="camera-focus-title">
+            <b id="cameraFocusTitle">Camera</b>
+            <span id="cameraFocusMeta"></span>
+          </div>
+          <div class="camera-focus-controls">
+            <button type="button" data-focus-action="zoom-out" title="Zoom out"><i class="bi bi-dash-lg"></i></button>
+            <button type="button" data-focus-action="reset" title="Reset zoom">100%</button>
+            <button type="button" data-focus-action="zoom-in" title="Zoom in"><i class="bi bi-plus-lg"></i></button>
+            <button type="button" data-focus-action="close" title="Close"><i class="bi bi-x-lg"></i></button>
+          </div>
+        </div>
+        <div class="camera-focus-body" id="cameraFocusViewport">
+          <img id="cameraFocusImage" alt="Expanded live camera">
+          <div class="camera-focus-loading" id="cameraFocusLoading"><i class="bi bi-camera-video"></i><span>Loading camera...</span></div>
+        </div>
+        <div class="camera-focus-foot">
+          <span><i class="bi bi-mouse"></i> Mouse wheel: zoom · Drag: move image · Double-click: reset</span>
+          <span id="cameraFocusZoom">100%</span>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+
+    const viewport = q('#cameraFocusViewport', modal);
+    const image = q('#cameraFocusImage', modal);
+    let scale = 1;
+    let translateX = 0;
+    let translateY = 0;
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+
+    const applyTransform = () => {
+      image.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+      setText('cameraFocusZoom', `${Math.round(scale * 100)}%`);
+    };
+    const reset = () => {
+      scale = 1;
+      translateX = 0;
+      translateY = 0;
+      applyTransform();
+    };
+    const close = () => {
+      modal.classList.remove('open');
+      image.removeAttribute('src');
+      document.body.classList.remove('camera-modal-open');
+      reset();
+    };
+    const zoom = amount => {
+      scale = Math.min(5, Math.max(0.5, scale + amount));
+      applyTransform();
+    };
+
+    modal.addEventListener('click', e => {
+      const action = e.target.closest('[data-focus-action]')?.dataset.focusAction;
+      if (action === 'close') close();
+      else if (action === 'zoom-in') zoom(0.25);
+      else if (action === 'zoom-out') zoom(-0.25);
+      else if (action === 'reset') reset();
+      else if (e.target === modal) close();
+    });
+    viewport.addEventListener('wheel', e => {
+      e.preventDefault();
+      zoom(e.deltaY < 0 ? 0.15 : -0.15);
+    }, {passive:false});
+    viewport.addEventListener('dblclick', e => {
+      e.preventDefault();
+      reset();
+    });
+    image.addEventListener('load', () => q('#cameraFocusLoading', modal)?.classList.add('hidden'));
+    image.addEventListener('error', () => {
+      const loading = q('#cameraFocusLoading', modal);
+      loading?.classList.remove('hidden');
+      if (loading) loading.innerHTML = '<i class="bi bi-exclamation-triangle"></i><span>Unable to open this camera stream.</span>';
+    });
+    image.addEventListener('mousedown', e => {
+      dragging = true;
+      startX = e.clientX - translateX;
+      startY = e.clientY - translateY;
+      image.classList.add('dragging');
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      translateX = e.clientX - startX;
+      translateY = e.clientY - startY;
+      applyTransform();
+    });
+    window.addEventListener('mouseup', () => {
+      dragging = false;
+      image.classList.remove('dragging');
+    });
+    document.addEventListener('keydown', e => {
+      if (!modal.classList.contains('open')) return;
+      if (e.key === 'Escape') close();
+      if (e.key === '+' || e.key === '=') zoom(0.25);
+      if (e.key === '-') zoom(-0.25);
+      if (e.key === '0') reset();
+    });
+
+    modal._cameraReset = reset;
+    return modal;
+  }
+
+  function openCameraFocus(number) {
+    const cam = cameras[number - 1];
+    const source = q(`#cameraStream${number}`);
+    if (!cam || !source) return;
+
+    const modal = ensureCameraFocusModal();
+    const image = q('#cameraFocusImage', modal);
+    const loading = q('#cameraFocusLoading', modal);
+    const mode = source.dataset.streamMode || 'ai';
+    const url = mode === 'ai' ? source.dataset.aiStreamUrl : source.dataset.rawStreamUrl;
+    if (!url) return;
+
+    setText('cameraFocusTitle', cam.name || `Camera ${number}`);
+    setText('cameraFocusMeta', `${cam.area || ''} · ${cam.ip || ''} · CH${cam.channel || ''} · ${mode.toUpperCase()}`);
+    if (loading) {
+      loading.innerHTML = '<i class="bi bi-camera-video"></i><span>Loading camera...</span>';
+      loading.classList.remove('hidden');
+    }
+    modal._cameraReset?.();
+    image.src = `${url}?popup=1&t=${Date.now()}`;
+    modal.classList.add('open');
+    document.body.classList.add('camera-modal-open');
+  }
+
+  qa('[data-camera-popup]').forEach(frame => {
+    frame.addEventListener('click', () => {
+      const card = frame.closest('.operator-camera-card');
+      const number = Number(card?.dataset.cameraNumber || 0);
+      if (number) openCameraFocus(number);
+    });
+  });
+
   function setCameraState(number, isLive, label) {
     const card = q(`.operator-camera-card[data-camera-number="${number}"]`);
     card?.classList.toggle('is-live', !!isLive);
+    card?.classList.toggle('is-offline', label === 'OFFLINE');
     card?.classList.toggle('is-standby', label === 'STANDBY');
     setText(`cameraState${number}`, label);
     q(`#streamMessage${number}`)?.classList.toggle('hidden', !!isLive);
@@ -194,6 +453,21 @@
       const response = await fetch(`${healthUrl}?t=${Date.now()}`, { cache: 'no-store' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      latestHealthData = data;
+      updatePickerHealth();
+
+      const healthRows = cameras.map(cam => data?.cameras?.[cam.camera_key] || {});
+      const onlineTotal = healthRows.filter(st => !!st.connected).length;
+      const offlineTotal = cameras.length - onlineTotal;
+      const aiTotal = healthRows.filter(st => {
+        const ai = st?.ai || {};
+        return ai.age_seconds !== null && ai.age_seconds !== undefined && !ai.last_error;
+      }).length;
+      setText('healthOnlineCount', onlineTotal);
+      setText('healthOfflineCount', offlineTotal);
+      setText('healthAiCount', aiTotal);
+      setText('healthTotalCount', cameras.length);
+
       let liveCount = 0;
       let aiLiveCount = 0;
       let aiErrors = 0;
@@ -222,17 +496,22 @@
         if (aiLive) aiLiveCount++;
         if (ai.last_error) aiErrors++;
 
-        let state = mode === 'ai' ? 'AI STARTING' : 'RAW CONNECTING';
+        let state = st.connected ? (mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING') : 'OFFLINE';
         if (mode === 'ai' && aiLive) state = 'AI LIVE';
         if (mode === 'raw' && rawLive) state = 'RAW LIVE';
         if (mode === 'ai' && ai.last_error) state = 'AI ERROR';
-        if (mode === 'raw' && !rawLive && st.last_error) state = 'OFFLINE';
+        if (!st.connected && st.last_error) state = 'OFFLINE';
         setCameraState(number, selectedLive, state);
         setText(`vehicleCount${number}`, fmt(ai.vehicles));
         setText(`personCount${number}`, fmt(ai.persons));
         const ms = Number(ai.last_inference_ms);
         setText(`inferenceMs${number}`, Number.isFinite(ms) ? `${Math.round(ms)} ms` : '—');
       });
+
+      if (cameraHealthFilter) {
+        applyPickerSearch();
+        applyCameraPage();
+      }
 
       setSystemState(
         liveCount,
