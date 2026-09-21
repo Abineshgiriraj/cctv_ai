@@ -116,6 +116,11 @@ class Config:
     SHARED_AI_WORKERS = max(1, min(4, int(os.getenv("SHARED_AI_WORKERS", 1))))
     ACTIVE_CAMERA_LIMIT = max(1, min(16, int(os.getenv("ACTIVE_CAMERA_LIMIT", 8))))
     AI_MODEL_IDLE_UNLOAD_SECONDS = max(2.0, float(os.getenv("AI_MODEL_IDLE_UNLOAD_SECONDS", 15)))
+    FOREGROUND_AI_FPS = max(0.1, float(os.getenv("FOREGROUND_AI_FPS", 1.0)))
+    BACKGROUND_AI_FPS = max(0.02, float(os.getenv("BACKGROUND_AI_FPS", 0.20)))
+    BACKGROUND_CAMERAS_PER_CYCLE = max(
+        1, min(4, int(os.getenv("BACKGROUND_CAMERAS_PER_CYCLE", 1)))
+    )
     YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", 640))
     YOLO_DEVICE = os.getenv("YOLO_DEVICE", "").strip()
     TRACK_TRAIL_LENGTH = int(os.getenv("TRACK_TRAIL_LENGTH", 18))
