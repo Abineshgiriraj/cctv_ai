@@ -22,6 +22,12 @@ class AccuracyDetector(AdvancedDetector):
         self.helmet_head_bounds_required = os.getenv(
             "HELMET_HEAD_BOUNDS_REQUIRED", "0"
         ).strip().lower() in {"1", "true", "yes", "on"}
+        self.helmet_head_crop_enabled = os.getenv(
+            "HELMET_HEAD_CROP_ENABLED", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.helmet_combo_fallback_enabled = os.getenv(
+            "HELMET_COMBO_FALLBACK_ENABLED", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         self.road_tile_overlap = float(os.getenv("ROAD_TILE_OVERLAP", "0.18"))
         self.road_tile_columns = max(1, min(3, int(os.getenv("ROAD_TILE_COLUMNS", "2"))))
@@ -69,6 +75,43 @@ class AccuracyDetector(AdvancedDetector):
         pad_bottom = int(bh * 0.20)
         return [max(0, bx1 - pad_x), max(0, by1 - pad_top), min(w, bx2 + pad_x), min(h, by2 + pad_bottom)]
 
+    def _helmet_search_regions(self, frame, bike_box, person_box=None):
+        """Return small-to-large rider regions for reliable distant helmet AI.
+
+        The old detector used one large bike/person crop. On wide CCTV views the
+        helmet occupied very few pixels inside that crop. We now try the rider's
+        head/shoulder region first, then fall back to the broader rider+bike crop.
+        """
+        h, w = frame.shape[:2]
+        regions = []
+
+        if person_box and self.helmet_head_crop_enabled:
+            px1, py1, px2, py2 = [int(v) for v in person_box]
+            pw = max(1, px2 - px1)
+            ph = max(1, py2 - py1)
+            head_region = [
+                max(0, px1 - int(pw * 0.30)),
+                max(0, py1 - int(ph * 0.18)),
+                min(w, px2 + int(pw * 0.30)),
+                min(h, py1 + int(ph * 0.52)),
+            ]
+            if (
+                head_region[2] - head_region[0] >= 12
+                and head_region[3] - head_region[1] >= 12
+            ):
+                regions.append(("rider_head", head_region))
+
+        if self.helmet_combo_fallback_enabled or not regions:
+            combo = self._expanded_bike_region(
+                frame,
+                bike_box,
+                person_box,
+            )
+            if combo:
+                regions.append(("bike_person_combo", combo))
+
+        return regions
+
     @staticmethod
     def _is_head_in_bounds(head_box, bike_box, person_box):
         hx1, hy1, hx2, hy2 = head_box
@@ -95,91 +138,180 @@ class AccuracyDetector(AdvancedDetector):
         model = self.models.get("helmet")
         if model is None:
             return None
-            
+
         if not self._bike_motion_ok(camera, bike):
             return None
 
         bike_box = bike.get("box")
         person_box = person.get("box") if person else None
-        region = self._expanded_bike_region(frame, bike_box, person_box)
-        source_name = "bike_person_combo"
-
-        if region is None:
+        regions = self._helmet_search_regions(
+            frame,
+            bike_box,
+            person_box,
+        )
+        if not regions:
             return None
-        crop = self._crop(frame, region, 4)
-        if crop is None or crop.size == 0:
-            return None
 
-        ch, cw = crop.shape[:2]
-        scale = 3.0 if max(ch, cw) < 180 else 2.0 if max(ch, cw) < 360 else 1.0
-        source = (
-            cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            if scale > 1.0 else crop
+        names = getattr(model, "names", {})
+        observation_threshold = max(
+            0.05,
+            min(
+                float(self.helmet_observation_confidence),
+                float(self.cfg.HELMET_CONFIDENCE),
+                float(self.cfg.NO_HELMET_CONFIDENCE),
+            ),
         )
 
-        try:
-            results = model.predict(
-                source,
-                conf=self.helmet_observation_confidence,
-                imgsz=self.cfg.HELMET_IMGSZ,
-                verbose=False,
-            )
-        except Exception as exc:
-            self.log.error(f"Helmet predict error: {exc}")
-            return None
+        all_candidates = []
 
-        candidates = {"helmet": [], "no_helmet": []}
-        names = getattr(model, "names", {})
-        for result in results or []:
-            boxes = getattr(result, "boxes", None)
-            if boxes is None:
+        for source_name, region in regions:
+            crop = self._crop(frame, region, 3)
+            if crop is None or crop.size == 0:
                 continue
-            for box in boxes:
-                try:
-                    cls_id = int(box.cls[0].item())
-                    confidence = float(box.conf[0].item())
-                    raw_name = names.get(cls_id, cls_id) if isinstance(names, dict) else names[cls_id]
-                    status = self._helmet_label(raw_name)
-                    
-                    if not status or confidence < self.helmet_observation_confidence:
-                        continue
-                        
-                    x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
-                    mapped = [
-                        int(region[0] + x1 / scale), int(region[1] + y1 / scale),
-                        int(region[0] + x2 / scale), int(region[1] + y2 / scale)
-                    ]
-                    
-                    if (
-                        self.helmet_head_bounds_required
-                        and not self._is_head_in_bounds(mapped, bike_box, person_box)
-                    ):
-                        self.log.debug(
-                            "Rejected out-of-bounds helmet detection bike=%s",
-                            bike.get("track_id"),
-                        )
-                        continue
-                        
-                    self.log.info(f"Observed on bike={bike.get('track_id')}: {raw_name} -> {status} (conf={confidence:.2f})")
 
-                    candidates[status].append({
-                        "status": status,
-                        "confidence": confidence,
-                        "box": mapped,
-                        "search_box": region,
-                        "source": source_name,
-                    })
-                except Exception:
+            ch, cw = crop.shape[:2]
+            max_side = max(ch, cw)
+            if max_side < 100:
+                scale = 4.0
+            elif max_side < 180:
+                scale = 3.0
+            elif max_side < 360:
+                scale = 2.0
+            else:
+                scale = 1.0
+
+            source = (
+                cv2.resize(
+                    crop,
+                    None,
+                    fx=scale,
+                    fy=scale,
+                    interpolation=cv2.INTER_CUBIC,
+                )
+                if scale > 1.0
+                else crop
+            )
+
+            try:
+                results = model.predict(
+                    source,
+                    conf=observation_threshold,
+                    imgsz=self.cfg.HELMET_IMGSZ,
+                    verbose=False,
+                )
+            except Exception as exc:
+                self.log.warning(
+                    "Helmet inference failed camera=%s source=%s: %s",
+                    camera.get("camera_key"),
+                    source_name,
+                    exc,
+                )
+                continue
+
+            region_candidates = []
+            for result in results or []:
+                boxes = getattr(result, "boxes", None)
+                if boxes is None:
                     continue
 
-        best_helmet = max(candidates["helmet"], key=lambda row: row["confidence"], default=None)
-        best_no_helmet = max(candidates["no_helmet"], key=lambda row: row["confidence"], default=None)
+                for box in boxes:
+                    try:
+                        cls_id = int(box.cls[0].item())
+                        confidence = float(box.conf[0].item())
+                        raw_name = (
+                            names.get(cls_id, cls_id)
+                            if isinstance(names, dict)
+                            else names[cls_id]
+                        )
+                        status = self._helmet_label(raw_name)
+                        if not status:
+                            continue
+
+                        x1, y1, x2, y2 = [
+                            float(v)
+                            for v in box.xyxy[0].tolist()
+                        ]
+                        mapped = [
+                            int(region[0] + x1 / scale),
+                            int(region[1] + y1 / scale),
+                            int(region[0] + x2 / scale),
+                            int(region[1] + y2 / scale),
+                        ]
+
+                        if (
+                            self.helmet_head_bounds_required
+                            and not self._is_head_in_bounds(
+                                mapped,
+                                bike_box,
+                                person_box,
+                            )
+                        ):
+                            continue
+
+                        # The tight rider-head crop is intentionally preferred
+                        # over a similarly confident detection in the large crop.
+                        score = confidence + (
+                            0.06 if source_name == "rider_head" else 0.0
+                        )
+                        row = {
+                            "status": status,
+                            "confidence": confidence,
+                            "box": mapped,
+                            "search_box": region,
+                            "source": source_name,
+                            "_score": score,
+                        }
+                        region_candidates.append(row)
+                    except Exception:
+                        continue
+
+            if region_candidates:
+                all_candidates.extend(region_candidates)
+                # If the focused head crop already sees a helmet/no-helmet,
+                # don't spend another full inference on the larger crop.
+                if source_name == "rider_head":
+                    break
+
+        if not all_candidates:
+            return None
+
+        best_by_status = {}
+        for row in all_candidates:
+            status = row["status"]
+            if (
+                status not in best_by_status
+                or row["_score"] > best_by_status[status]["_score"]
+            ):
+                best_by_status[status] = row
+
+        best_helmet = best_by_status.get("helmet")
+        best_no_helmet = best_by_status.get("no_helmet")
 
         if best_helmet and best_no_helmet:
-            if best_helmet["confidence"] >= self.helmet_observation_confidence and best_no_helmet["confidence"] < best_helmet["confidence"] + self.helmet_conflict_margin:
-                return best_helmet
-            return best_no_helmet
-        return best_helmet or best_no_helmet
+            # Avoid random no-helmet flicker when the helmet class is at least
+            # as convincing within the configured conflict margin.
+            if (
+                best_helmet["confidence"]
+                + self.helmet_conflict_margin
+                >= best_no_helmet["confidence"]
+            ):
+                chosen = best_helmet
+            else:
+                chosen = best_no_helmet
+        else:
+            chosen = best_helmet or best_no_helmet
+
+        if chosen is not None:
+            chosen.pop("_score", None)
+            self.log.debug(
+                "Helmet observation camera=%s bike=%s status=%s conf=%.3f source=%s",
+                camera.get("camera_key"),
+                bike.get("track_id"),
+                chosen["status"],
+                chosen["confidence"],
+                chosen.get("source"),
+            )
+        return chosen
 
     def _helmet_confirmed(self, camera, bike, observation):
         key = self._track_key(camera, bike)
