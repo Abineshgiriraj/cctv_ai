@@ -6,7 +6,7 @@
   const healthUrl = cfg.healthUrl || `${baseUrl}/health`;
   const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
   let livePage = 1;
-  let livePageSize = 8;
+  let livePageSize = 4;
   let visibleCameraKeys = [];
   let recorderFilter = '';
 
