@@ -231,26 +231,36 @@ body { background: #06101a; }
 
 .operator-camera-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
 .operator-camera-grid[data-page-size="2"] { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.operator-camera-grid[data-page-size="4"] { grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
 .operator-camera-grid[data-page-size="6"] { grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.operator-camera-grid[data-page-size="8"] { grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
 .operator-camera-grid[data-page-size="10"] { grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
 
 .operator-camera-grid[data-page-size="6"] .operator-camera-head,
+.operator-camera-grid[data-page-size="8"] .operator-camera-head,
 .operator-camera-grid[data-page-size="10"] .operator-camera-head { padding:10px 11px; }
 .operator-camera-grid[data-page-size="6"] .operator-camera-title h3,
+.operator-camera-grid[data-page-size="8"] .operator-camera-title h3,
 .operator-camera-grid[data-page-size="10"] .operator-camera-title h3 { font-size:12px; }
 .operator-camera-grid[data-page-size="6"] .operator-camera-title p,
+.operator-camera-grid[data-page-size="8"] .operator-camera-title p,
 .operator-camera-grid[data-page-size="10"] .operator-camera-title p { font-size:9px; }
 .operator-camera-grid[data-page-size="6"] .camera-state-text,
+.operator-camera-grid[data-page-size="8"] .camera-state-text,
 .operator-camera-grid[data-page-size="10"] .camera-state-text { font-size:9px; }
 .operator-camera-grid[data-page-size="6"] .operator-camera-toolbar,
+.operator-camera-grid[data-page-size="8"] .operator-camera-toolbar,
 .operator-camera-grid[data-page-size="10"] .operator-camera-toolbar { padding:7px 8px; }
 .operator-camera-grid[data-page-size="10"] .operator-mode-switch button,
 .operator-camera-grid[data-page-size="10"] .camera-action-btn { padding:5px 6px; font-size:9px; }
 .operator-camera-grid[data-page-size="6"] .camera-useful-stats small,
+.operator-camera-grid[data-page-size="8"] .camera-useful-stats small,
 .operator-camera-grid[data-page-size="10"] .camera-useful-stats small { font-size:7px; }
 .operator-camera-grid[data-page-size="6"] .camera-useful-stats b,
+.operator-camera-grid[data-page-size="8"] .camera-useful-stats b,
 .operator-camera-grid[data-page-size="10"] .camera-useful-stats b { font-size:13px; }
 .operator-camera-grid[data-page-size="6"] .camera-useful-stats > div,
+.operator-camera-grid[data-page-size="8"] .camera-useful-stats > div,
 .operator-camera-grid[data-page-size="10"] .camera-useful-stats > div { padding:8px 7px; }
 .operator-camera-card {
   border:1px solid var(--ops-border);
@@ -395,6 +405,7 @@ body.camera-modal-open { overflow:hidden; }
 .live-dot { width:8px; height:8px; border-radius:50%; background:var(--ops-good); box-shadow:0 0 0 4px rgba(34,197,94,.12); }
 
 @media (max-width: 1180px) {
+  .operator-camera-grid[data-page-size="8"] { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .operator-camera-grid[data-page-size="10"] { grid-template-columns:repeat(3,minmax(0,1fr)); }
   .operator-summary { grid-template-columns:repeat(2,1fr); }
   .report-filter-grid { grid-template-columns:repeat(3,1fr); }
