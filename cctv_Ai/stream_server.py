@@ -725,6 +725,7 @@ def shared_ai_worker(worker_id: int, cameras):
     background_interval = 1.0 / max(Config.BACKGROUND_AI_FPS, 0.02)
     focus_cursor = 0
     background_cursor = 0
+    foreground_turns = 0
     states = {}
     for camera in cameras:
         key = camera["camera_key"]
@@ -760,22 +761,28 @@ def shared_ai_worker(worker_id: int, cameras):
             if not is_camera_focused(camera["camera_key"])
         ]
 
-        # Do not process the whole 49-camera partition before returning to the
-        # visible feeds. Take one foreground camera, then a small number of
-        # background cameras. This keeps the displayed video responsive while
-        # still rotating continuously through all configured cameras.
+        # Give the visible feeds most inference turns so tracking looks like
+        # tracking rather than a series of unrelated detections. Hidden cameras
+        # still rotate through background monitoring, but only after several
+        # foreground turns.
         ordered_cameras = []
         if focused:
             ordered_cameras.append(focused[focus_cursor % len(focused)])
             focus_cursor += 1
+            foreground_turns += 1
 
-        if background:
+        should_scan_background = (
+            not focused
+            or foreground_turns >= Config.BACKGROUND_SCAN_EVERY_N_FOREGROUND
+        )
+        if background and should_scan_background:
             take = min(Config.BACKGROUND_CAMERAS_PER_CYCLE, len(background))
             for _ in range(take):
                 ordered_cameras.append(
                     background[background_cursor % len(background)]
                 )
                 background_cursor += 1
+            foreground_turns = 0
 
         if not ordered_cameras:
             ordered_cameras = cameras[:1]
@@ -802,12 +809,17 @@ def shared_ai_worker(worker_id: int, cameras):
             started = time.perf_counter()
 
             try:
+                inference_size = (
+                    Config.FOREGROUND_YOLO_IMGSZ
+                    if focused_now
+                    else Config.BACKGROUND_YOLO_IMGSZ
+                )
                 results = model.predict(
                     source=work,
                     classes=Config.TARGET_CLASSES,
                     conf=Config.CONFIDENCE_THRESHOLD,
                     iou=Config.IOU_THRESHOLD,
-                    imgsz=Config.YOLO_IMGSZ,
+                    imgsz=inference_size,
                     device=Config.YOLO_DEVICE or None,
                     verbose=False,
                 )
