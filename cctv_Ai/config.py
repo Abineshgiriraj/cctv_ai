@@ -134,6 +134,9 @@ class Config:
     YOLO_DEVICE = os.getenv("YOLO_DEVICE", "").strip()
     TRACK_TRAIL_LENGTH = int(os.getenv("TRACK_TRAIL_LENGTH", 18))
     JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", 80))
+    LIVE_OVERLAY_MIN_CONFIDENCE = min(
+        0.95, max(0.05, float(os.getenv("LIVE_OVERLAY_MIN_CONFIDENCE", 0.35)))
+    )
 
     COUNTING_ENABLED = _bool("COUNTING_ENABLED", True)
     COUNT_LINE_Y_RATIO = min(0.95, max(0.05, float(os.getenv("COUNT_LINE_Y_RATIO", 0.62))))
