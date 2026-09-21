@@ -121,7 +121,16 @@ class Config:
     BACKGROUND_CAMERAS_PER_CYCLE = max(
         1, min(4, int(os.getenv("BACKGROUND_CAMERAS_PER_CYCLE", 1)))
     )
+    BACKGROUND_SCAN_EVERY_N_FOREGROUND = max(
+        1, int(os.getenv("BACKGROUND_SCAN_EVERY_N_FOREGROUND", 3))
+    )
     YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", 640))
+    FOREGROUND_YOLO_IMGSZ = max(
+        320, int(os.getenv("FOREGROUND_YOLO_IMGSZ", min(YOLO_IMGSZ, 512)))
+    )
+    BACKGROUND_YOLO_IMGSZ = max(
+        256, int(os.getenv("BACKGROUND_YOLO_IMGSZ", min(FOREGROUND_YOLO_IMGSZ, 384)))
+    )
     YOLO_DEVICE = os.getenv("YOLO_DEVICE", "").strip()
     TRACK_TRAIL_LENGTH = int(os.getenv("TRACK_TRAIL_LENGTH", 18))
     JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", 80))
