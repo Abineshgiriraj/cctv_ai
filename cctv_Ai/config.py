@@ -154,6 +154,26 @@ class Config:
     ROAD_EVERY_N_FRAMES = max(1, int(os.getenv("ROAD_EVERY_N_FRAMES", 3)))
     ROAD_ROI_TOP_RATIO = min(0.85, max(0.0, float(os.getenv("ROAD_ROI_TOP_RATIO", 0.22))))
 
+    # Accident detection uses YOLO/ByteTrack trajectories, not a separate accident .pt.
+    INCIDENT_DETECTION_ENABLED = _bool("INCIDENT_DETECTION_ENABLED", True)
+    INCIDENT_EVERY_N_FRAMES = max(1, int(os.getenv("INCIDENT_EVERY_N_FRAMES", 1)))
+    ACCIDENT_DETECTION_ENABLED = _bool("ACCIDENT_DETECTION_ENABLED", True)
+    ACCIDENT_CONFIRM_FRAMES = max(1, int(os.getenv("ACCIDENT_CONFIRM_FRAMES", 2)))
+    ACCIDENT_MIN_MOTION_RATIO = max(0.0005, float(os.getenv("ACCIDENT_MIN_MOTION_RATIO", 0.004)))
+    ACCIDENT_STOP_RATIO = min(0.95, max(0.05, float(os.getenv("ACCIDENT_STOP_RATIO", 0.35))))
+    ACCIDENT_PROXIMITY_RATIO = max(0.20, float(os.getenv("ACCIDENT_PROXIMITY_RATIO", 0.80)))
+    ACCIDENT_IOU_THRESHOLD = min(0.80, max(0.0, float(os.getenv("ACCIDENT_IOU_THRESHOLD", 0.01))))
+
+    # Fallen trees/branches/debris can be detected as persistent roadway
+    # obstructions without a custom obstruction model.
+    ROAD_OBSTRUCTION_FALLBACK_ENABLED = _bool("ROAD_OBSTRUCTION_FALLBACK_ENABLED", True)
+    OBSTRUCTION_ROI_TOP_RATIO = min(0.85, max(0.0, float(os.getenv("OBSTRUCTION_ROI_TOP_RATIO", 0.25))))
+    OBSTRUCTION_MIN_AREA_RATIO = min(0.50, max(0.002, float(os.getenv("OBSTRUCTION_MIN_AREA_RATIO", 0.01))))
+    OBSTRUCTION_CONFIRM_FRAMES = max(2, int(os.getenv("OBSTRUCTION_CONFIRM_FRAMES", 6)))
+    OBSTRUCTION_WARMUP_FRAMES = max(5, int(os.getenv("OBSTRUCTION_WARMUP_FRAMES", 20)))
+    OBSTRUCTION_LEARNING_RATE = min(0.05, max(0.00001, float(os.getenv("OBSTRUCTION_LEARNING_RATE", 0.0005))))
+    INCIDENT_COOLDOWN_SECONDS = max(15, int(os.getenv("INCIDENT_COOLDOWN_SECONDS", 120)))
+
     VIOLATION_COOLDOWN_SECONDS = max(10, int(os.getenv("VIOLATION_COOLDOWN_SECONDS", 90)))
     ROAD_EVENT_COOLDOWN_SECONDS = max(10, int(os.getenv("ROAD_EVENT_COOLDOWN_SECONDS", 120)))
     OCR_ENABLED = _bool("OCR_ENABLED", True)
