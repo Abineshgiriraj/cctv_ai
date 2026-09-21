@@ -951,13 +951,14 @@ def _annotate_tracking(camera, frame, result, model, history, last_seen,
             elif cls_id in Config.VEHICLE_CLASSES:
                 vehicles += 1
 
-            detection_rows.append({
-                "class_id": cls_id,
-                "label": normalized_name,
-                "confidence": round(conf, 4),
-                "track_id": track_id,
-                "box": [x1, y1, x2, y2],
-            })
+            if conf >= Config.LIVE_OVERLAY_MIN_CONFIDENCE:
+                detection_rows.append({
+                    "class_id": cls_id,
+                    "label": normalized_name,
+                    "confidence": round(conf, 4),
+                    "track_id": track_id,
+                    "box": [x1, y1, x2, y2],
+                })
 
             color = class_colors.get(cls_id, (44, 223, 255))
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
