@@ -143,6 +143,8 @@
     const pageRows = rows.slice(start, end);
     visibleCameraKeys = pageRows.map(cam => cam.camera_key);
     const visibleSet = new Set(visibleCameraKeys);
+    const grid = q('.operator-camera-grid');
+    if (grid) grid.dataset.pageSize = String(livePageSize);
 
     cameras.forEach((cam, index) => {
       const number = index + 1;
