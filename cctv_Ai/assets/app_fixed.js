@@ -13,6 +13,8 @@
   const selectedCameraKeys = new Set();
   let latestHealthData = null;
   let latestCountLineRatio = 0.62;
+  const cameraOverlayStates = new Map();
+  let overlayAnimationStarted = false;
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
   const fmt = (value) => Number(value || 0).toLocaleString('en-IN');
@@ -125,12 +127,28 @@
 
   function clearCameraOverlay(number) {
     const canvas = q(`#cameraOverlay${number}`);
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    cameraOverlayStates.delete(number);
   }
 
-  function drawCameraOverlay(number, payload) {
+  function ensureOverlayState(number) {
+    if (!cameraOverlayStates.has(number)) {
+      cameraOverlayStates.set(number, {
+        sourceWidth: 0,
+        sourceHeight: 0,
+        tracks: new Map(),
+        lastPayloadAt: 0,
+        lastDetectionAge: null,
+        lastRevision: -1
+      });
+    }
+    return cameraOverlayStates.get(number);
+  }
+
+  function updateCameraOverlay(number, payload) {
     const canvas = q(`#cameraOverlay${number}`);
     const img = q(`#cameraStream${number}`);
     if (!canvas || !img) return;
@@ -143,15 +161,98 @@
     }
 
     canvas.classList.remove('hidden');
+    const state = ensureOverlayState(number);
+    const now = performance.now();
+    state.sourceWidth = Number(payload?.source_width || state.sourceWidth || 0);
+    state.sourceHeight = Number(payload?.source_height || state.sourceHeight || 0);
+    state.lastPayloadAt = now;
+    state.lastDetectionAge = Number(payload?.age_seconds);
+
+    const revision = Number(payload?.revision ?? -1);
+    if (revision === state.lastRevision) {
+      return;
+    }
+    state.lastRevision = revision;
+
+    const detections = Array.isArray(payload?.detections) ? payload.detections : [];
+    const seen = new Set();
+
+    detections.forEach((det, index) => {
+      const box = Array.isArray(det.box) ? det.box.map(Number) : [];
+      if (box.length !== 4 || box.some(v => !Number.isFinite(v))) return;
+
+      const trackKey = det.track_id !== null && det.track_id !== undefined
+        ? `track-${det.track_id}`
+        : `det-${String(det.label || 'object')}-${index}`;
+      seen.add(trackKey);
+
+      const existing = state.tracks.get(trackKey);
+      const previousTarget = existing?.targetBox || existing?.currentBox || box;
+      const previousUpdateAt = existing?.updatedAt || now - 500;
+      const updateGap = Math.max(180, Math.min(1100, now - previousUpdateAt));
+
+      const velocity = previousTarget.map((value, i) => (
+        (box[i] - value) / updateGap
+      ));
+
+      state.tracks.set(trackKey, {
+        key: trackKey,
+        trackId: det.track_id,
+        label: String(det.label || 'object').toLowerCase(),
+        confidence: Number(det.confidence || 0),
+        startBox: existing?.currentBox?.slice() || previousTarget.slice(),
+        currentBox: existing?.currentBox?.slice() || previousTarget.slice(),
+        targetBox: box.slice(),
+        velocity,
+        animationStart: now,
+        animationDuration: Math.max(260, Math.min(700, updateGap * 0.72)),
+        updatedAt: now,
+        missingSince: null
+      });
+    });
+
+    state.tracks.forEach((track, key) => {
+      if (seen.has(key)) return;
+      if (track.missingSince === null) track.missingSince = now;
+      if (now - track.missingSince > 1800) state.tracks.delete(key);
+    });
+
+    startOverlayAnimation();
+  }
+
+  function interpolateBox(track, now) {
+    const duration = Math.max(1, track.animationDuration || 400);
+    const raw = Math.min(1, Math.max(0, (now - track.animationStart) / duration));
+    const eased = 1 - Math.pow(1 - raw, 3);
+    const box = track.startBox.map((start, i) => (
+      start + (track.targetBox[i] - start) * eased
+    ));
+
+    // A tiny capped prediction after the interpolation finishes keeps the box
+    // moving naturally until the next AI result arrives, instead of freezing.
+    if (raw >= 1) {
+      const extraMs = Math.min(220, Math.max(0, now - (track.animationStart + duration)));
+      for (let i = 0; i < 4; i++) {
+        box[i] += (track.velocity?.[i] || 0) * extraMs * 0.35;
+      }
+    }
+    track.currentBox = box;
+    return box;
+  }
+
+  function renderCameraOverlay(number, now) {
+    const canvas = q(`#cameraOverlay${number}`);
+    const img = q(`#cameraStream${number}`);
+    const state = cameraOverlayStates.get(number);
+    if (!canvas || !img || !state) return;
+    if ((img.dataset.streamMode || 'ai') !== 'ai') return;
+
     const host = canvas.parentElement;
     const width = host?.clientWidth || 0;
     const height = host?.clientHeight || 0;
-    const sourceWidth = Number(payload?.source_width || 0);
-    const sourceHeight = Number(payload?.source_height || 0);
-    if (!width || !height || !sourceWidth || !sourceHeight) {
-      clearCameraOverlay(number);
-      return;
-    }
+    const sourceWidth = Number(state.sourceWidth || 0);
+    const sourceHeight = Number(state.sourceHeight || 0);
+    if (!width || !height || !sourceWidth || !sourceHeight) return;
 
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const targetWidth = Math.max(1, Math.round(width * dpr));
@@ -170,11 +271,6 @@
     const drawHeight = sourceHeight * scale;
     const offsetX = (width - drawWidth) / 2;
     const offsetY = (height - drawHeight) / 2;
-    const age = Number(payload?.age_seconds);
-    const stale = Number.isFinite(age) && age > 8;
-
-    // Do not keep very old boxes on a moving live image.
-    if (stale) return;
 
     const colors = {
       person: '#34d399',
@@ -186,41 +282,61 @@
     };
 
     const lineY = offsetY + sourceHeight * latestCountLineRatio * scale;
-    ctx.strokeStyle = '#facc15';
+    ctx.strokeStyle = 'rgba(250, 204, 21, .88)';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(offsetX, lineY);
     ctx.lineTo(offsetX + drawWidth, lineY);
     ctx.stroke();
-    ctx.font = '700 11px Manrope, sans-serif';
+    ctx.font = '700 10px Manrope, sans-serif';
     ctx.fillStyle = '#facc15';
-    ctx.fillText('COUNTING LINE', offsetX + 8, Math.max(offsetY + 14, lineY - 7));
+    ctx.fillText('COUNTING LINE', offsetX + 8, Math.max(offsetY + 13, lineY - 7));
 
-    (payload?.detections || []).forEach(det => {
-      const box = Array.isArray(det.box) ? det.box : [];
-      if (box.length !== 4) return;
-      const x = offsetX + Number(box[0]) * scale;
-      const y = offsetY + Number(box[1]) * scale;
-      const w = Math.max(1, (Number(box[2]) - Number(box[0])) * scale);
-      const h = Math.max(1, (Number(box[3]) - Number(box[1])) * scale);
-      const label = String(det.label || 'object').toLowerCase();
-      const color = colors[label] || '#2cdfef';
-      const track = det.track_id === null || det.track_id === undefined ? '' : ` #${det.track_id}`;
-      const confidence = Math.round(Number(det.confidence || 0) * 100);
-      const text = `${label.toUpperCase()}${track} ${confidence}%`;
+    const payloadAge = Number(state.lastDetectionAge);
+    const payloadStale = Number.isFinite(payloadAge) && payloadAge > 6;
+    if (payloadStale) return;
+
+    state.tracks.forEach(track => {
+      if (track.missingSince !== null && now - track.missingSince > 1200) return;
+      const box = interpolateBox(track, now);
+      const x = offsetX + box[0] * scale;
+      const y = offsetY + box[1] * scale;
+      const w = Math.max(1, (box[2] - box[0]) * scale);
+      const h = Math.max(1, (box[3] - box[1]) * scale);
+
+      const color = colors[track.label] || '#2cdfef';
+      const trackText = track.trackId === null || track.trackId === undefined
+        ? ''
+        : ` #${track.trackId}`;
+      const confidence = Math.round(Number(track.confidence || 0) * 100);
+      const label = `${track.label.toUpperCase()}${trackText} ${confidence}%`;
 
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, w, h);
 
-      ctx.font = '700 11px Manrope, sans-serif';
-      const textWidth = ctx.measureText(text).width + 10;
-      const labelY = Math.max(offsetY, y - 20);
-      ctx.fillStyle = 'rgba(2, 8, 14, .82)';
-      ctx.fillRect(x, labelY, textWidth, 18);
+      ctx.font = '700 10px Manrope, sans-serif';
+      const textWidth = Math.min(width - x, ctx.measureText(label).width + 9);
+      const labelY = Math.max(offsetY, y - 18);
+      ctx.fillStyle = 'rgba(2, 8, 14, .78)';
+      ctx.fillRect(x, labelY, Math.max(0, textWidth), 17);
       ctx.fillStyle = color;
-      ctx.fillText(text, x + 5, labelY + 13);
+      ctx.fillText(label, x + 4, labelY + 12);
     });
+  }
+
+  function startOverlayAnimation() {
+    if (overlayAnimationStarted) return;
+    overlayAnimationStarted = true;
+
+    const tick = now => {
+      visibleCameraKeys.forEach(key => {
+        const number = cameras.findIndex(cam => cam.camera_key === key) + 1;
+        if (number > 0) renderCameraOverlay(number, now);
+      });
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   async function refreshVisibleDetections() {
@@ -238,10 +354,11 @@
       if (!data.ok) return;
       visibleCameraKeys.forEach(key => {
         const number = cameras.findIndex(cam => cam.camera_key === key) + 1;
-        if (number > 0) drawCameraOverlay(number, data.cameras?.[key] || {});
+        if (number > 0) updateCameraOverlay(number, data.cameras?.[key] || {});
       });
     } catch (_) {}
   }
+
 
   function loadVisibleStream(number) {
     const img = q(`#cameraStream${number}`);
@@ -909,7 +1026,7 @@
   fetchViolations();
   refreshHelmetModelStatus();
   setInterval(refreshHealth, 3000);
-  setInterval(refreshVisibleDetections, 700);
+  setInterval(refreshVisibleDetections, 350);
   setInterval(refreshTodaySummary, 5000);
   setInterval(fetchReportData, 5000);
   setInterval(fetchViolations, 5000);
