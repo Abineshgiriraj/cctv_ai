@@ -898,7 +898,10 @@
       const data = await res.json().catch(() => ({}));
       const helmet = data?.models?.helmet || {};
       el.classList.remove('error', 'success');
-      if (res.ok && helmet.loaded) {
+      if (res.ok && helmet.loaded && helmet.no_helmet_supported === false) {
+        el.classList.add('error');
+        el.textContent = 'Helmet model loaded but no bare-head/no-helmet class is recognized. Check the model labels.';
+      } else if (res.ok && helmet.loaded) {
         const classes = helmet.classes ? Object.values(helmet.classes).join(', ') : '';
         el.classList.add('success');
         el.textContent = `Helmet model ready${classes ? ` · Classes: ${classes}` : ''}`;
@@ -1038,3 +1041,4 @@
   setInterval(fetchViolations, 5000);
   setInterval(refreshHelmetModelStatus, 15000);
 })();
+

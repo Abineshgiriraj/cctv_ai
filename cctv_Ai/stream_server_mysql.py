@@ -180,6 +180,10 @@ _original_annotate = base._annotate_tracking
 def _put_latest_task(target, task):
     camera_key = task["camera"]["camera_key"]
     with _analysis_task_condition:
+        previous = target.get(camera_key)
+        if previous is not None:
+            # Refresh pixels without resetting this camera's place in the queue.
+            task["queued_at"] = previous["queued_at"]
         target[camera_key] = task
         _analysis_task_condition.notify_all()
 
@@ -219,13 +223,15 @@ def _advanced_analysis_loop():
                     task["processed_index"],
                     draw_frame=None,
                 )
-            helmet_live = summary.get("helmet_live") or []
-            base.set_ai_status(
-                camera["camera_key"],
-                advanced=summary,
-                helmet_detections=helmet_live,
-                helmet_detections_at=time.time(),
-            )
+            status = {"advanced": summary}
+            # A road-only pass has no new helmet result; preserve the last result
+            # and its timestamp so the UI can expire it normally.
+            if summary.get("helmet_ran"):
+                status.update(
+                    helmet_detections=summary.get("helmet_live") or [],
+                    helmet_detections_at=task["captured_at"],
+                )
+            base.set_ai_status(camera["camera_key"], **status)
         except Exception as exc:
             log.exception(
                 "Async advanced detection failed camera=%s: %s",
@@ -286,6 +292,18 @@ def _start_analysis_workers():
 
 def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
                             processed_index, inference_ms, count_state):
+    run_advanced = (
+        Config.ADVANCED_DETECTION_ENABLED
+        and (processed_index % Config.ADVANCED_EVERY_N_FRAMES == 0
+             or processed_index % Config.ROAD_EVERY_N_FRAMES == 0)
+    )
+    run_incident = (
+        Config.INCIDENT_DETECTION_ENABLED
+        and processed_index % Config.INCIDENT_EVERY_N_FRAMES == 0
+    )
+    # Capture before primary annotations obscure small rider heads.
+    clean_frame = frame.copy() if run_advanced or run_incident else None
+    captured_at = time.time()
     # Primary person/vehicle tracking and counting completes immediately.
     # Expensive helmet/plate/road/incident models run asynchronously on the
     # newest available frame and therefore cannot freeze live vehicle boxes.
@@ -308,27 +326,17 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
         "model": model,
         "processed_index": processed_index,
         "queued_at": now,
+        "captured_at": captured_at,
     }
 
-    run_advanced = (
-        Config.ADVANCED_DETECTION_ENABLED
-        and (
-            processed_index % Config.ADVANCED_EVERY_N_FRAMES == 0
-            or processed_index % Config.ROAD_EVERY_N_FRAMES == 0
-        )
-    )
     if run_advanced:
         advanced_task = dict(base_task)
-        advanced_task["frame"] = frame.copy()
+        advanced_task["frame"] = clean_frame
         _put_latest_task(_advanced_latest_tasks, advanced_task)
 
-    run_incident = (
-        Config.INCIDENT_DETECTION_ENABLED
-        and processed_index % Config.INCIDENT_EVERY_N_FRAMES == 0
-    )
     if run_incident:
         incident_task = dict(base_task)
-        incident_task["frame"] = frame.copy()
+        incident_task["frame"] = clean_frame.copy()
         _put_latest_task(_incident_latest_tasks, incident_task)
 
     return persons, vehicles, class_counts
@@ -577,3 +585,4 @@ if __name__ == "__main__":
     )
     log.info("Advanced AI status: %s", _safe_runtime_readiness())
     base.app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+

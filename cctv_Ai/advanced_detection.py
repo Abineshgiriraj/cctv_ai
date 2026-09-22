@@ -98,6 +98,11 @@ class AdvancedDetector:
             model = self.models.get(name)
             row["loaded"] = model is not None
             row["classes"] = getattr(model, "names", {}) if model is not None else {}
+            if name == "helmet":
+                names = row["classes"]
+                labels = names.values() if isinstance(names, dict) else names
+                statuses = {self._helmet_label(label) for label in labels}
+                row["no_helmet_supported"] = "no_helmet" in statuses
         result["ocr"] = {
             "available": self.ocr is not None,
             "loaded": self.ocr is not None,
@@ -204,11 +209,14 @@ class AdvancedDetector:
 
     @staticmethod
     def _helmet_label(name):
-        normalized = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
         if any(term in normalized for term in (
             "no_helmet", "nohelmet", "without_helmet", "withouthelmet",
             "helmetless", "barehead", "bare_head", "nohardhat", "no_hardhat",
+            "without_hardhat", "without_hard_hat", "no_hard_hat", "no_helment",
         )):
+            return "no_helmet"
+        if normalized in {"head", "heads"}:
             return "no_helmet"
         if "helmet" in normalized or "hardhat" in normalized:
             return "helmet"
@@ -458,12 +466,10 @@ class AdvancedDetector:
             return None
         status, confidence, vote_count, vote_window = confirmation
         person_track_id = person.get("track_id") if person else None
-        key = (camera["camera_key"], bike.get("track_id"), person_track_id if person_track_id is not None else -1)
+        key = (self._track_key(camera, bike), self._track_key(camera, person) if person else None)
         now = time.time()
         if now - self.last_violation[key] < self.cfg.VIOLATION_COOLDOWN_SECONDS:
             return None
-        self.last_violation[key] = now
-
         if person:
             pb, bb = person["box"], bike["box"]
             union = [min(bb[0], pb[0]), min(bb[1], pb[1]), max(bb[2], pb[2]), max(bb[3], pb[3])]
@@ -473,7 +479,7 @@ class AdvancedDetector:
                      max(bb[2], region[2]), max(bb[3], region[3])]
         evidence = self._crop(frame, union, 40)
         plate_confirmed = bool(plate and plate.get("confirmed"))
-        return self.store.record_violation(
+        event_id = self.store.record_violation(
             session_id=self.session_id,
             camera=camera,
             violation_type="no_helmet",
@@ -496,6 +502,11 @@ class AdvancedDetector:
                 "plate_ocr_text": plate.get("text") if plate_confirmed else None,
             },
         )
+
+        # A failed insert must remain eligible for retry on the next observation.
+        if event_id:
+            self.last_violation[key] = now
+        return event_id
 
     def _road_roi(self, frame):
         h, w = frame.shape[:2]
@@ -631,3 +642,4 @@ class AdvancedDetector:
                 camera, clean_frame, "road_obstruction", "road_obstruction", draw_frame=draw_frame))
 
         return summary
+

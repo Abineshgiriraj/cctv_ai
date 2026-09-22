@@ -15,8 +15,8 @@ class AccuracyDetector(AdvancedDetector):
         self.no_helmet_final_avg_confidence = float(os.getenv("NO_HELMET_FINAL_AVG_CONFIDENCE", "0.20"))
         self.strict_no_helmet_vote_ratio = float(os.getenv("STRICT_NO_HELMET_VOTE_RATIO", "0.50"))
         
-        self.helmet_confirm_frames = int(os.getenv("HELMET_CONFIRM_FRAMES", "2"))
-        self.helmet_confirm_window = int(os.getenv("HELMET_CONFIRM_WINDOW", "4"))
+        self.helmet_confirm_frames = max(1, int(os.getenv("HELMET_CONFIRM_FRAMES", "2")))
+        self.helmet_confirm_window = max(self.helmet_confirm_frames, int(os.getenv("HELMET_CONFIRM_WINDOW", "4")))
         
         self.helmet_conflict_margin = float(os.getenv("HELMET_CONFLICT_MARGIN", "0.12"))
         self.helmet_head_bounds_required = os.getenv(
@@ -106,7 +106,11 @@ class AccuracyDetector(AdvancedDetector):
 
         if region is None:
             return None
-        crop = self._crop(frame, region, 4)
+        # Use the same clipped origin for cropping and mapping detections back.
+        h, w = frame.shape[:2]
+        region = [max(0, region[0] - 4), max(0, region[1] - 4),
+                  min(w, region[2] + 4), min(h, region[3] + 4)]
+        crop = self._crop(frame, region)
         if crop is None or crop.size == 0:
             return None
 
@@ -390,11 +394,13 @@ class AccuracyDetector(AdvancedDetector):
 
     def process(self, camera, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
-        draw_frame = draw_frame if draw_frame is not None else clean_frame
+        draw_frame = draw_frame if draw_frame is not None else clean_frame.copy()
         summary = {
             "helmet_checked": 0, "helmet_detected": 0, "no_helmet_detected": 0,
             "helmet_violations": 0, "plate_detected": 0, "plate_read": 0, "road_events": 0,
             "helmet_live": [],
+            "helmet_ran": False,
+            "helmet_storage_errors": 0,
         }
         if not self.cfg.ADVANCED_DETECTION_ENABLED or primary_result is None:
             return summary
@@ -403,6 +409,7 @@ class AccuracyDetector(AdvancedDetector):
         run_road_ai = processed_index % self.cfg.ROAD_EVERY_N_FRAMES == 0
 
         if run_rider_ai:
+            summary["helmet_ran"] = True
             persons, bikes = self._primary_objects(primary_result, primary_model)
             vehicles = self._primary_vehicles(primary_result)
             plate_detections = (
@@ -499,7 +506,13 @@ class AccuracyDetector(AdvancedDetector):
                     
                 summary["no_helmet_detected"] += 1
                 
-                stored = self._store_no_helmet(camera, clean_frame, bike, rider, confirmation, observation["search_box"], plate)
+                try:
+                    stored = self._store_no_helmet(camera, clean_frame, bike, rider, confirmation, observation["search_box"], plate)
+                except Exception:
+                    summary["helmet_storage_errors"] += 1
+                    self.log.exception("Helmet violation storage failed camera=%s track=%s",
+                                       camera["camera_key"], track_id)
+                    continue
                 if stored:
                     summary["helmet_violations"] += 1
                     self.log.info(f"Bike {track_id} violation STORED.")
@@ -511,3 +524,4 @@ class AccuracyDetector(AdvancedDetector):
             summary["road_events"] += len(self._run_road_model(camera, clean_frame, "road_obstruction", "road_obstruction", draw_frame=draw_frame))
 
         return summary
+
