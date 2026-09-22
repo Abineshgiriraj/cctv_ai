@@ -14,6 +14,9 @@
   let latestHealthData = null;
   let latestCountLineRatio = 0.62;
   const cameraOverlayStates = new Map();
+  const frameLoader = new window.CameraFrames();
+  let detectionRequestRunning = false;
+  window.addEventListener('pagehide', () => frameLoader.close());
   let overlayAnimationStarted = false;
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
@@ -119,10 +122,9 @@
   }
 
   function displayStreamUrl(img) {
-    // AI mode uses the smooth raw MJPEG as the video layer. Detection boxes are
-    // drawn separately on a browser canvas, so video playback is not tied to
-    // slow YOLO inference frames.
-    return img?.dataset.rawStreamUrl || '';
+    // Finite raw JPEG requests keep video independent of model latency and
+    // avoid exhausting HTTP connections with permanent MJPEG streams.
+    return (img?.dataset.rawStreamUrl || '').replace('/video_feed/', '/snapshot/');
   }
 
   function clearCameraOverlay(number) {
@@ -343,14 +345,17 @@
   }
 
   async function refreshVisibleDetections() {
-    if (!q('#cameraPagination') || !visibleCameraKeys.length) return;
+    if (!q('#cameraPagination') || !visibleCameraKeys.length || detectionRequestRunning) return;
+    detectionRequestRunning = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
     try {
       const params = new URLSearchParams({
         keys: visibleCameraKeys.join(','),
         t: String(Date.now())
       });
       const response = await fetch(`${baseUrl}/live/detections?${params.toString()}`, {
-        cache: 'no-store'
+        cache: 'no-store', signal: controller.signal
       });
       if (!response.ok) return;
       const data = await response.json();
@@ -359,7 +364,11 @@
         const number = cameras.findIndex(cam => cam.camera_key === key) + 1;
         if (number > 0) updateCameraOverlay(number, data.cameras?.[key] || {});
       });
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      clearTimeout(timeout);
+      detectionRequestRunning = false;
+    }
   }
 
 
@@ -368,14 +377,23 @@
     if (!img) return;
     const url = displayStreamUrl(img);
     if (!url) return;
-    const wanted = `${url}?page=${livePage}&t=${Date.now()}`;
-    if (!img.getAttribute('src')) img.src = wanted;
+    frameLoader.add(`camera-${number}`, img, url, () => {
+      const firstFrame = !img.dataset.frameLoadedAt;
+      img.dataset.frameLoadedAt = String(Date.now());
+      if (firstFrame) setCameraState(number, true, img.dataset.streamMode === 'raw' ? 'RAW LIVE' : 'VIDEO LIVE · AI CHECKING');
+    }, error => {
+      delete img.dataset.frameLoadedAt;
+      setCameraState(number, false, 'FRAME RETRY');
+      const message = q(`#streamMessage${number} span`);
+      if (message) message.textContent = `${error.message}. Retrying automatically…`;
+    });
   }
 
   function unloadHiddenStream(number) {
     const img = q(`#cameraStream${number}`);
     if (!img) return;
-    img.removeAttribute('src');
+    frameLoader.remove(`camera-${number}`);
+    delete img.dataset.frameLoadedAt;
     clearCameraOverlay(number);
   }
 
@@ -548,7 +566,7 @@
     };
     const close = () => {
       modal.classList.remove('open');
-      image.removeAttribute('src');
+      frameLoader.remove('focus');
       document.body.classList.remove('camera-modal-open');
       reset();
     };
@@ -627,7 +645,14 @@
       loading.classList.remove('hidden');
     }
     modal._cameraReset?.();
-    image.src = `${url}?popup=1&t=${Date.now()}`;
+    frameLoader.remove('focus');
+    frameLoader.add('focus', image, url,
+      () => loading?.classList.add('hidden'),
+      error => {
+        loading?.classList.remove('hidden');
+        const text = q('span', loading);
+        if (text) text.textContent = `${error.message}. Retrying…`;
+      });
     modal.classList.add('open');
     document.body.classList.add('camera-modal-open');
   }
@@ -738,13 +763,14 @@
         const aiAge = Number(ai.age_seconds);
         const aiLive = !!(
           ai.model_loaded
+          && ai.age_seconds !== null && ai.age_seconds !== undefined
           && Number.isFinite(aiAge)
           && aiAge <= 15
           && !ai.last_error
         );
         const img = q(`#cameraStream${number}`);
         const mode = img?.dataset.streamMode || 'ai';
-        const selectedLive = rawLive;
+        const selectedLive = rawLive && Number(img?.dataset.frameLoadedAt || 0) > Date.now() - 8000;
         const active = activeSet.has(key);
 
         if (!active) {
@@ -755,9 +781,9 @@
         if (aiLive) aiLiveCount++;
         if (ai.last_error) aiErrors++;
 
-        let state = st.connected ? (mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING') : 'OFFLINE';
-        if (mode === 'ai' && rawLive && aiLive) state = 'AI LIVE';
-        if (mode === 'raw' && rawLive) state = 'RAW LIVE';
+        let state = st.connected ? (selectedLive ? 'VIDEO LIVE · AI WAIT' : 'FRAME RETRY') : 'OFFLINE';
+        if (mode === 'ai' && selectedLive && aiLive) state = 'AI LIVE';
+        if (mode === 'raw' && selectedLive) state = 'RAW LIVE';
         if (mode === 'ai' && rawLive && ai.last_error) state = 'AI ERROR';
         if (!rawLive) {
           state = 'OFFLINE';
@@ -804,7 +830,7 @@
     q(`#cameraOverlay${number}`)?.classList.toggle('hidden', mode !== 'ai');
     if (mode !== 'ai') clearCameraOverlay(number);
     setCameraState(number, false, mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING');
-    img.src = `${url}?t=${Date.now()}`;
+    loadVisibleStream(number);
     if (mode === 'ai') refreshVisibleDetections();
   };
 
@@ -814,7 +840,10 @@
     const url = displayStreamUrl(img);
     if (!url) return;
     setCameraState(number, false, 'RECONNECTING');
-    img.src = `${url}?reconnect=${Date.now()}`;
+    frameLoader.remove(`camera-${number}`);
+    delete img.dataset.frameLoadedAt;
+    loadVisibleStream(number);
+    syncBackendFocus(visibleCameraKeys);
   };
 
   async function refreshTodaySummary() {

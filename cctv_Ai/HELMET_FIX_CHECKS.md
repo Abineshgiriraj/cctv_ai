@@ -25,3 +25,52 @@ Use the same recorded clip, camera configuration and weights on both versions.
 
 Automated checks: `python -m unittest discover -s tests -v` and `node --check assets/app_fixed.js`.
 Tests use fake inference/storage objects. Actual model accuracy, RTSP connectivity and MySQL inserts need local validation.
+
+## Update from the main branch and recover a waiting stream
+
+Stop the existing backend console with Ctrl+C. In PowerShell:
+
+```powershell
+cd D:\XAMPP\htdocs\test\cctv_ai
+git switch main
+git pull --ff-only origin main
+git branch --show-current
+cd cctv_Ai
+.\start-mjpeg.bat
+```
+
+The branch command must print `main`. Do not switch back to
+`restore-good-tracking-display-only` after pulling. If Git reports local changes,
+keep them and resolve the reported conflict; do not use `reset --hard`.
+
+Wait for the backend to announce port 5000, leave its console open, and press
+Ctrl+F5 on Live Monitoring. The grid now uses finite JPEG requests (at most two
+concurrent image downloads), with retry and timeout, so eight cameras do not
+hold all browser HTTP connections open. AI canvas overlays remain separate.
+The live indicator requires a decoded image; FRAME RETRY means the image request
+failed. Hidden cameras release their requests and image resources.
+
+Normal startup no longer downloads weights or synchronously queries every
+recorder for titles. If the helmet model is missing, stop the backend, run
+`setup-ai-models.bat` once, and restart it. Recorder titles can be refreshed
+separately with `python nvr_channel_sync.py` (use the virtual-environment Python
+if that is how this installation runs).
+
+On the backend PC check:
+
+- `http://127.0.0.1:5000/health`: backend responds and selected cameras have
+  `connected: true` and `has_frame: true`.
+- While that camera is visible, open
+  `http://127.0.0.1:5000/snapshot/192.168.0.241_ch1`: a JPEG should display.
+  Substitute the actual configured camera key if different. An HTTP 503 means
+  capture has not produced a display frame; inspect the backend console.
+- `http://127.0.0.1:5000/advanced/status`: helmet `loaded: true` and
+  `no_helmet_supported: true`.
+- `http://127.0.0.1:5000/analytics/status`: `connected: true`.
+
+Then perform the helmeted/no-helmet rider acceptance tests above and inspect
+Helmet Violations for a new timestamp and evidence image. If these prerequisites
+fail, collect the relevant JSON and backend error text; the browser screenshot
+alone does not establish model readiness or database connectivity.
+
+Additional automated check: `node --test tests/test_camera_frames.js`.
