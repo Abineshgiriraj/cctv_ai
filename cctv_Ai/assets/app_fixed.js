@@ -5,6 +5,8 @@
   const baseUrl = cfg.baseUrl || 'http://127.0.0.1:5000';
   const healthUrl = cfg.healthUrl || `${baseUrl}/health`;
   const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+  const frameLoader = new window.CameraFrames();
+  window.addEventListener('pagehide', () => frameLoader.close());
   let livePage = 1;
   let livePageSize = 2;
   let visibleCameraKeys = [];
@@ -115,20 +117,34 @@
     }
   }
 
+  function snapshotUrl(img, mode) {
+    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    return (url || '').replace('/tracked_feed/', '/ai_snapshot/').replace('/video_feed/', '/snapshot/');
+  }
+
   function loadVisibleStream(number) {
     const img = q(`#cameraStream${number}`);
     if (!img) return;
     const mode = img.dataset.streamMode || 'ai';
-    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    const url = snapshotUrl(img, mode);
     if (!url) return;
-    const wanted = `${url}?page=${livePage}&t=${Date.now()}`;
-    if (!img.getAttribute('src')) img.src = wanted;
+    frameLoader.add(`camera-${number}`, img, url, () => {
+      const firstFrame = !img.dataset.frameLoadedAt;
+      img.dataset.frameLoadedAt = String(Date.now());
+      if (firstFrame) setCameraState(number, true, mode === 'ai' ? 'AI LIVE' : 'RAW LIVE');
+    }, error => {
+      delete img.dataset.frameLoadedAt;
+      setCameraState(number, false, 'FRAME RETRY');
+      const message = q(`#streamMessage${number} span`);
+      if (message) message.textContent = `${error.message}. Retrying automatically…`;
+    });
   }
 
   function unloadHiddenStream(number) {
     const img = q(`#cameraStream${number}`);
     if (!img) return;
-    img.removeAttribute('src');
+    frameLoader.remove(`camera-${number}`);
+    delete img.dataset.frameLoadedAt;
   }
 
   function applyCameraPage() {
@@ -304,7 +320,7 @@
     };
     const close = () => {
       modal.classList.remove('open');
-      image.removeAttribute('src');
+      frameLoader.remove('focus');
       document.body.classList.remove('camera-modal-open');
       reset();
     };
@@ -373,7 +389,7 @@
     const image = q('#cameraFocusImage', modal);
     const loading = q('#cameraFocusLoading', modal);
     const mode = source.dataset.streamMode || 'ai';
-    const url = mode === 'ai' ? source.dataset.aiStreamUrl : source.dataset.rawStreamUrl;
+    const url = snapshotUrl(source, mode);
     if (!url) return;
 
     setText('cameraFocusTitle', cam.name || `Camera ${number}`);
@@ -383,7 +399,14 @@
       loading.classList.remove('hidden');
     }
     modal._cameraReset?.();
-    image.src = `${url}?popup=1&t=${Date.now()}`;
+    frameLoader.remove('focus');
+    frameLoader.add('focus', image, url,
+      () => loading?.classList.add('hidden'),
+      error => {
+        loading?.classList.remove('hidden');
+        const text = q('span', loading);
+        if (text) text.textContent = `${error.message}. Retrying…`;
+      });
     modal.classList.add('open');
     document.body.classList.add('camera-modal-open');
   }
@@ -493,7 +516,7 @@
         const aiLive = !!(ai.model_loaded && ai.has_frame && !ai.last_error);
         const img = q(`#cameraStream${number}`);
         const mode = img?.dataset.streamMode || 'ai';
-        const selectedLive = mode === 'ai' ? aiLive : rawLive;
+        const selectedLive = (mode === 'ai' ? aiLive : rawLive) && Number(img?.dataset.frameLoadedAt || 0) > Date.now() - 8000;
         const active = activeSet.has(key);
 
         if (!active) {
@@ -505,8 +528,8 @@
         if (ai.last_error) aiErrors++;
 
         let state = st.connected ? (mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING') : 'OFFLINE';
-        if (mode === 'ai' && aiLive) state = 'AI LIVE';
-        if (mode === 'raw' && rawLive) state = 'RAW LIVE';
+        if (mode === 'ai' && selectedLive) state = 'AI LIVE';
+        if (mode === 'raw' && selectedLive) state = 'RAW LIVE';
         if (mode === 'ai' && ai.last_error) state = 'AI ERROR';
         if (!st.connected && st.last_error) state = 'OFFLINE';
         setCameraState(number, selectedLive, state);
@@ -545,20 +568,24 @@
     img.dataset.streamMode = mode;
     q(`#aiMode${number}`)?.classList.toggle('active', mode === 'ai');
     q(`#rawMode${number}`)?.classList.toggle('active', mode === 'raw');
-    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    const url = snapshotUrl(img, mode);
     if (!url) return;
     setCameraState(number, false, mode === 'ai' ? 'AI STARTING' : 'RAW CONNECTING');
-    img.src = `${url}?t=${Date.now()}`;
+    delete img.dataset.frameLoadedAt;
+    loadVisibleStream(number);
   };
 
   window.reconnectCamera = (number) => {
     const img = q(`#cameraStream${number}`);
     if (!img) return;
     const mode = img.dataset.streamMode || 'ai';
-    const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
+    const url = snapshotUrl(img, mode);
     if (!url) return;
     setCameraState(number, false, 'RECONNECTING');
-    img.src = `${url}?reconnect=${Date.now()}`;
+    frameLoader.remove(`camera-${number}`);
+    delete img.dataset.frameLoadedAt;
+    loadVisibleStream(number);
+    syncBackendFocus(visibleCameraKeys);
   };
 
   async function refreshTodaySummary() {
@@ -642,7 +669,10 @@
       const data = await res.json().catch(() => ({}));
       const helmet = data?.models?.helmet || {};
       el.classList.remove('error', 'success');
-      if (res.ok && helmet.loaded) {
+      if (res.ok && helmet.loaded && helmet.no_helmet_supported === false) {
+        el.classList.add('error');
+        el.textContent = 'Helmet model has no recognized no-helmet class. Check the model labels.';
+      } else if (res.ok && helmet.loaded) {
         const classes = helmet.classes ? Object.values(helmet.classes).join(', ') : '';
         el.classList.add('success');
         el.textContent = `Helmet model ready${classes ? ` · Classes: ${classes}` : ''}`;
@@ -780,3 +810,4 @@
   setInterval(fetchViolations, 5000);
   setInterval(refreshHelmetModelStatus, 15000);
 })();
+
