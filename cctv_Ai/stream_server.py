@@ -184,62 +184,40 @@ def set_ai_status(camera_key: str, **fields):
         row.update(fields)
 
 
-def capture_stream(camera: dict):
+def _capture_session(camera):
     camera_key = camera["camera_key"]
     camera_ip = camera["camera_ip"]
-    """Keep RTSP open for every camera when MONITOR_ALL_CAMERAS is enabled."""
-    reconnect_delay = Config.RTSP_RECONNECT_SECONDS + (
-        int(camera.get("channel_no") or 1) % 5
-    ) * 0.35
-
-    while True:
+    cap = cv2.VideoCapture()
+    try:
+        set_status(camera_key, connected=False, standby=False,
+                   capture_phase="opening", capture_operation_at=time.time(),
+                   last_error="Opening RTSP stream")
+        log.info("Connecting RTSP camera=%s channel=%s subtype=%s", camera_key,
+                 camera["channel_no"], Config.CAMERA_SUBTYPE)
+        # These are open-only FFmpeg properties; setting them after open has no effect.
+        opened = cap.open(rtsp_url(camera), cv2.CAP_FFMPEG, [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+        ])
+        if not opened:
+            set_status(camera_key, last_error="RTSP open failed or timed out. Check channel, credentials and network.",
+                       last_error_at=time.time())
+            return
         if not is_camera_active(camera_key):
-            _clear_camera_buffers(camera_key)
-            set_status(camera_key, connected=False, standby=True, last_error=None)
-            time.sleep(0.25)
-            continue
-
-        url = rtsp_url(camera)
-        log.info(
-            "Connecting RTSP camera=%s channel=%s subtype=%s transport=tcp",
-            camera_key,
-            camera["channel_no"],
-            Config.CAMERA_SUBTYPE,
-        )
-        set_status(camera_key, standby=False)
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
-
-        if not cap.isOpened():
-            msg = (
-                f"OpenCV could not open RTSP for {camera_ip}:554 "
-                f"(channel={camera['channel_no']}, subtype={Config.CAMERA_SUBTYPE}). "
-                "Check network, credentials, channel availability, and RTSP service."
-            )
-            log.error(msg)
-            set_status(camera_key, connected=False, standby=False, last_error=msg, last_error_at=time.time())
-            cap.release()
-            time.sleep(reconnect_delay)
-            continue
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        log.info("RTSP open camera=%s size=%sx%s fps=%s", camera_key, width, height, fps)
-        set_status(camera_key, connected=True, standby=False, last_error=None)
-
+            return
+        log.info("RTSP open camera=%s", camera_key)
         fail_reads = 0
         while is_camera_active(camera_key):
+            set_status(camera_key, capture_phase="reading", capture_operation_at=time.time())
             ret, frame = cap.read()
+            if not is_camera_active(camera_key):
+                break
             if not ret or frame is None:
                 fail_reads += 1
                 msg = f"RTSP read failed for {camera_ip} (consecutive={fail_reads})"
                 log.warning(msg)
                 set_status(camera_key, connected=False, last_error=msg, last_error_at=time.time())
-                if fail_reads >= 3:
+                if fail_reads >= 1:
                     break
                 time.sleep(0.2)
                 continue
@@ -289,15 +267,36 @@ def capture_stream(camera: dict):
                 row = camera_status.setdefault(camera_key, {})
                 row["last_jpeg_bytes"] = len(jpeg)
 
+    finally:
+        set_status(camera_key, capture_phase="closing", capture_operation_at=time.time())
         cap.release()
-        if not is_camera_active(camera_key):
-            log.info("Camera moved to standby camera=%s", camera_key)
-            _clear_camera_buffers(camera_key)
-            set_status(camera_key, connected=False, standby=True, last_error=None)
-            continue
 
-        log.error("Reconnecting camera=%s in %ss", camera_key, reconnect_delay)
-        time.sleep(reconnect_delay)
+
+def capture_stream(camera: dict):
+    """Keep one capture owner per camera and retry failed sessions."""
+    camera_key = camera["camera_key"]
+    reconnect_delay = Config.RTSP_RECONNECT_SECONDS + (int(camera.get("channel_no") or 1) % 5) * 0.35
+    while True:
+        if not is_camera_active(camera_key):
+            _clear_camera_buffers(camera_key)
+            set_status(camera_key, connected=False, standby=True, last_error=None,
+                       last_jpeg_bytes=0, capture_phase="standby", capture_operation_at=time.time())
+            time.sleep(0.25)
+            continue
+        try:
+            _capture_session(camera)
+        except Exception as exc:
+            # Avoid exposing credential-bearing native exception text in /health.
+            msg = "Capture worker error (" + type(exc).__name__ + "). Retrying RTSP."
+            log.error("%s camera=%s", msg, camera_key)
+            set_status(camera_key, last_error=msg, last_error_at=time.time())
+        _clear_camera_buffers(camera_key)
+        set_status(camera_key, connected=False, last_jpeg_bytes=0,
+                   capture_phase="retrying", capture_operation_at=time.time())
+        # Brief waits allow page switches to put this worker back into standby.
+        until = time.time() + reconnect_delay
+        while is_camera_active(camera_key) and time.time() < until:
+            time.sleep(0.1)
 
 
 def _class_name(model, cls_id: int) -> str:
@@ -1049,6 +1048,9 @@ def health():
             last = st.get("last_frame_at")
             ai_last = ai.get("last_processed_at")
             cameras[key] = {
+                "capture_phase": st.get("capture_phase", "unknown"),
+                "capture_operation_age_seconds": (None if st.get("capture_operation_at") is None
+                                                  else round(now - st["capture_operation_at"], 2)),
                 "connected": bool(st.get("connected")),
                 "active": is_camera_focused(key),
                 "monitored": is_camera_active(key),
@@ -1300,4 +1302,5 @@ if __name__ == "__main__":
         Config.COUNT_LINE_Y_RATIO,
     )
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
 
