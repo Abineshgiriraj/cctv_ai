@@ -68,6 +68,9 @@ class AdvancedDetector:
     def _load_ocr(self):
         if not self.cfg.OCR_ENABLED:
             return
+        if "plate" not in self.models:
+            self.log.info("Skipping OCR initialization: plate detector is not loaded")
+            return
         try:
             import easyocr
             self.ocr = easyocr.Reader(["en"], gpu=False, verbose=False)

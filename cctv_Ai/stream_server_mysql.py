@@ -421,7 +421,7 @@ if __name__ == "__main__":
             daemon=True,
             name=f"capture-{cam['camera_key']}",
         ).start()
-        if Config.CAMERA_CONNECT_STAGGER_SECONDS:
+        if Config.CAMERA_CONNECT_STAGGER_SECONDS and base.is_camera_active(cam["camera_key"]):
             time.sleep(Config.CAMERA_CONNECT_STAGGER_SECONDS)
 
     if Config.MONITOR_ALL_CAMERAS:

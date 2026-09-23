@@ -68,7 +68,8 @@ def _ensure_initial_focus():
         return
     with lock:
         if not focus_initialized:
-            active_camera_keys.update(allowed_keys()[:Config.ACTIVE_CAMERA_LIMIT])
+            # Start only the default two-camera page, not the maximum grid size.
+            active_camera_keys.update(allowed_keys()[:min(2, Config.ACTIVE_CAMERA_LIMIT)])
             focus_initialized = True
 
 
