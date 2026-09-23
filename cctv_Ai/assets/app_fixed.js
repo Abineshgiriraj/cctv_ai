@@ -5,7 +5,7 @@
   const baseUrl = cfg.baseUrl || 'http://127.0.0.1:5000';
   const healthUrl = cfg.healthUrl || `${baseUrl}/health`;
   const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
-  const frameLoader = new window.CameraFrames();
+  let frameLoader = new window.CameraFrames();
   window.addEventListener('pagehide', () => frameLoader.close());
   let livePage = 1;
   let livePageSize = 2;
@@ -14,6 +14,30 @@
   let cameraHealthFilter = '';
   const selectedCameraKeys = new Set();
   let latestHealthData = null;
+  const viewKey = `cctv-live:${location.pathname.replace(/[^/]*$/, '')}`;
+  function saveLiveView() {
+    try { localStorage.setItem(viewKey, JSON.stringify({page: livePage, size: livePageSize,
+      recorder: recorderFilter, health: cameraHealthFilter, selected: [...selectedCameraKeys]})); } catch (_) {}
+  }
+  function restoreLiveView() {
+    try {
+      const state = JSON.parse(localStorage.getItem(viewKey) || 'null');
+      if (!state || typeof state !== 'object') return;
+      livePage = Number.isInteger(state.page) && state.page > 0 ? state.page : 1;
+      if ([2, 4, 6, 8, 10].includes(state.size)) livePageSize = state.size;
+      recorderFilter = cameras.some(c => c.ip === state.recorder) ? state.recorder : '';
+      cameraHealthFilter = ['', 'online', 'offline', 'ai_ready', 'ai_error'].includes(state.health) ? state.health : '';
+      selectedCameraKeys.clear();
+      for (const key of Array.isArray(state.selected) ? state.selected : []) {
+        if (cameras.some(c => c.camera_key === key)) selectedCameraKeys.add(key);
+      }
+    } catch (_) {}
+  }
+  window.addEventListener('pageshow', event => {
+    if (!event.persisted) return;
+    frameLoader = new window.CameraFrames();
+    applyCameraPage();
+  });
 
   const setText = (id, value) => { const el = q(`#${id}`); if (el) el.textContent = value; };
   const fmt = (value) => Number(value || 0).toLocaleString('en-IN');
@@ -184,6 +208,7 @@
     if (prev) prev.disabled = livePage <= 1;
     if (next) next.disabled = livePage >= totalPages;
 
+    saveLiveView();
     syncBackendFocus(visibleCameraKeys);
   }
 
@@ -200,6 +225,13 @@
     livePageSize = [2, 4, 6, 8, 10].includes(requestedPageSize) ? requestedPageSize : 2;
     recorderFilter = recorder?.value || '';
     cameraHealthFilter = health?.value || '';
+    restoreLiveView();
+    if (size) size.value = String(livePageSize);
+    if (recorder) recorder.value = recorderFilter;
+    if (health) health.value = cameraHealthFilter;
+    qa('#cameraPickerList input[type="checkbox"]').forEach(input => {
+      input.checked = selectedCameraKeys.has(input.value);
+    });
 
     pickerToggle?.addEventListener('click', e => {
       e.stopPropagation();
@@ -588,6 +620,7 @@
     frameLoader.remove(`camera-${number}`);
     delete img.dataset.frameLoadedAt;
     loadVisibleStream(number);
+    saveLiveView();
     syncBackendFocus(visibleCameraKeys);
   };
 
@@ -813,4 +846,5 @@
   setInterval(fetchViolations, 5000);
   setInterval(refreshHelmetModelStatus, 15000);
 })();
+
 

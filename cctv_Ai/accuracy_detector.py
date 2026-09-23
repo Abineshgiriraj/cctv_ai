@@ -122,8 +122,7 @@ class AccuracyDetector(AdvancedDetector):
         if person_box:
             px1, py1, px2, py2 = person_box
             pw = px2 - px1
-            if (px1 - pw*0.3) <= hcx <= (px2 + pw*0.3) and (py1 - 50) <= hcy <= py2:
-                return True
+            return (px1 - pw*0.15) <= hcx <= (px2 + pw*0.15) and (py1 - (py2-py1)*0.2) <= hcy <= py1 + (py2-py1)*0.5
         
         bx1, by1, bx2, by2 = bike_box
         bw = bx2 - bx1
@@ -242,7 +241,7 @@ class AccuracyDetector(AdvancedDetector):
                         ]
 
                         if (
-                            self.helmet_head_bounds_required
+                            (person_box is not None or self.helmet_head_bounds_required)
                             and not self._is_head_in_bounds(
                                 mapped,
                                 bike_box,
@@ -316,8 +315,8 @@ class AccuracyDetector(AdvancedDetector):
             )
         return chosen
 
-    def _helmet_confirmed(self, camera, bike, observation):
-        key = self._track_key(camera, bike)
+    def _helmet_confirmed(self, camera, bike, observation, person=None):
+        key = (self._track_key(camera, bike), self._track_key(camera, person)) if person else self._track_key(camera, bike)
         votes = self.helmet_votes[key]
         votes.append((observation["status"], observation["confidence"]))
         
@@ -523,6 +522,16 @@ class AccuracyDetector(AdvancedDetector):
 
         return events
 
+    def _rider_pairs(self, persons, bikes):
+        assigned = [[] for _ in bikes]
+        for person in persons:
+            candidates = [(score, i) for i, bike in enumerate(bikes)
+                          if (score := self._rider_score(person["box"], bike["box"])) is not None]
+            if candidates:
+                assigned[min(candidates)[1]].append(person)
+        return [(bike, rider) for bike, riders in zip(bikes, assigned)
+                for rider in (riders or [None])]
+
     def process(self, camera, clean_frame, primary_result, primary_model,
                 processed_index, draw_frame=None):
         draw_frame = draw_frame if draw_frame is not None else clean_frame.copy()
@@ -534,7 +543,6 @@ class AccuracyDetector(AdvancedDetector):
             return summary
 
         run_rider_ai = processed_index % self.cfg.ADVANCED_EVERY_N_FRAMES == 0
-        run_road_ai = processed_index % self.cfg.ROAD_EVERY_N_FRAMES == 0
 
         if run_rider_ai:
             persons, bikes = self._primary_objects(primary_result, primary_model)
@@ -568,14 +576,17 @@ class AccuracyDetector(AdvancedDetector):
                     label += " ?"
                 self._draw(draw_frame, plate["box"], label, (255, 160, 0))
 
-            for bike in bikes:
-                rider = self._best_rider(persons, bike)
+            # Assign each person to one motorcycle; inspect both rider and pillion.
+            pairs = self._rider_pairs(persons, bikes)
+            summary["motorcycles"] = len(bikes)
+            summary["rider_candidates"] = sum(rider is not None for _, rider in pairs)
+            for bike, rider in pairs:
                 plate = plate_by_vehicle.get(self._track_key(camera, bike))
                 observation = self._helmet_status(camera, clean_frame, bike, rider)
-                
+
                 track_id = bike.get("track_id")
                 if track_id is not None:
-                    key = self._track_key(camera, bike)
+                    key = (self._track_key(camera, bike), self._track_key(camera, rider)) if rider else self._track_key(camera, bike)
                     votes = self.helmet_votes.get(key, [])
                     no_helmet_votes = sum(1 for v in votes if v[0] == "no_helmet")
                     helmet_votes = sum(1 for v in votes if v[0] == "helmet")
@@ -601,7 +612,7 @@ class AccuracyDetector(AdvancedDetector):
                     continue
                 summary["helmet_checked"] += 1
                 
-                confirmation = self._helmet_confirmed(camera, bike, observation)
+                confirmation = self._helmet_confirmed(camera, bike, observation, rider)
                 status = observation["status"]
                 confidence = observation["confidence"]
                 
@@ -637,9 +648,10 @@ class AccuracyDetector(AdvancedDetector):
                 else:
                     self.log.info(f"Bike {track_id} violation NOT stored (cooldown or error).")
 
-        if run_road_ai:
-            summary["road_events"] += len(self._run_road_model(camera, clean_frame, "road_damage", "road_damage", draw_frame=draw_frame))
-            summary["road_events"] += len(self._run_road_model(camera, clean_frame, "road_obstruction", "road_obstruction", draw_frame=draw_frame))
-
         return summary
 
+    def process_road(self, camera, frame):
+        if not self.cfg.ADVANCED_DETECTION_ENABLED:
+            return 0
+        return sum(len(self._run_road_model(camera, frame, name, name))
+                   for name in ("road_damage", "road_obstruction"))

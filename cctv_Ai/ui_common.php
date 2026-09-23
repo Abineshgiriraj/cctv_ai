@@ -100,6 +100,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
         'reports' => ['reports.php', 'bi-bar-chart-line', 'Vehicle Reports'],
         'violations' => ['violations.php', 'bi-exclamation-triangle', 'Helmet Violations'],
         'road' => ['road_damage.php', 'bi-cone-striped', 'Road Damage'],
+        'obstructions' => ['obstructions.php', 'bi-tree', 'Road Obstructions'],
         'incidents' => ['incidents.php', 'bi-exclamation-octagon', 'Incidents'],
     ];
     ?>
@@ -113,7 +114,7 @@ function render_page_start(string $active, string $title, string $subtitle = '')
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="stylesheet" href="assets/app.css">
-    <link rel="stylesheet" href="assets/ops.css?v=8">
+    <link rel="stylesheet" href="assets/ops.css?v=9">
     <link rel="stylesheet" href="assets/road.css">
 </head>
 <body>
@@ -164,7 +165,7 @@ window.CCTV_UI_CONFIG = {
 };
 </script>
 <script src="assets/camera_frames.js?v=2"></script>
-<script src="assets/app_fixed.js?v=restore-12"></script>
+<script src="assets/app_fixed.js?v=restore-13"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>
@@ -172,4 +173,5 @@ window.CCTV_UI_CONFIG = {
 </html>
 <?php
 }
+
 

@@ -13,6 +13,7 @@ from road_report_routes import register_road_report_routes
 from config import Config
 from analytics_store import TrafficStore
 from incident_detector import IncidentDetector
+from road_worker import RoadWorker
 
 log = logging.getLogger("mjpeg-mysql")
 advanced = RiderVerifiedDetector(Config, base.traffic_store, base.SERVER_SESSION_ID, log)
@@ -165,6 +166,18 @@ base._maybe_count_object = _patched_maybe_count_object
 base.advanced_model_readiness = _safe_runtime_readiness
 
 
+def _process_road(camera, frame):
+    count = advanced.process_road(camera, frame)
+    base.set_ai_status(camera["camera_key"], road_analysis={"events": count, "updated_at": time.time(), "error": None})
+
+
+def _road_error(key):
+    log.exception("Road analysis failed camera=%s", key)
+    base.set_ai_status(key, road_analysis={"error": "Road inference failed; see backend log"})
+
+
+_road_worker = RoadWorker(_process_road, base.is_camera_active, _road_error)
+_last_road_submit = {}
 _original_annotate = base._annotate_tracking
 
 
@@ -195,6 +208,12 @@ def _annotate_with_advanced(camera, frame, result, model, history, last_seen,
                 processed_index,
                 draw_frame=frame,
             )
+        now = time.monotonic()
+        key = camera["camera_key"]
+        if (processed_index % Config.ROAD_EVERY_N_FRAMES == 0
+                and now - _last_road_submit.get(key, float('-inf')) >= 10):
+            _last_road_submit[key] = now
+            _road_worker.submit(camera, clean_frame)
         incident_summary = {}
         try:
             incidents.store = store
@@ -457,3 +476,4 @@ if __name__ == "__main__":
     )
     log.info("Advanced AI status: %s", _safe_runtime_readiness())
     base.app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+

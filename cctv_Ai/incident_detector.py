@@ -158,7 +158,8 @@ class IncidentDetector:
                 camera["camera_key"], incident_type, exc,
             )
             return None
-        self.last_incident[cooldown_key] = now
+        if row_id:
+            self.last_incident[cooldown_key] = now
         return row_id
 
     def _detect_accident(self, camera, frame, vehicles, persons, draw_frame):
@@ -446,6 +447,9 @@ class IncidentDetector:
                 int(cy / max(60, h * 0.08)),
             )
             active_keys.add(spatial)
+            # Count observations, not multiple contours in the same spatial cell.
+            if self.obstruction_last_seen.get(spatial) == now:
+                continue
             self.obstruction_votes[spatial] += 1
             self.obstruction_last_seen[spatial] = now
 
@@ -485,7 +489,7 @@ class IncidentDetector:
             )
             if row_id:
                 stored += 1
-            self.obstruction_votes[spatial] = 0
+                self.obstruction_votes[spatial] = 0
 
         for key in list(self.obstruction_votes):
             if key[0] != camera_key:
@@ -515,3 +519,4 @@ class IncidentDetector:
                 camera, frame, vehicles, persons, draw_frame,
             )
         return summary
+
