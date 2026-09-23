@@ -42,3 +42,28 @@ Check on the backend PC:
 Validation: node --test tests/test_camera_frames.js and
 python -m unittest discover -s tests -v. These tests mock camera/model/DB access;
 actual RTSP feeds, trained-model accuracy and MySQL saving need local verification.
+
+## HTTP 503 on many cards
+
+AI mode now opts into a fresh raw-frame fallback while its tracked frame is absent
+or older than 15 seconds. The card says RAW LIVE · AI WAIT; it does not claim AI
+tracking is working. Fresh tracked frames automatically restore AI LIVE. If raw
+capture also fails, the card displays the backend error and retries with increasing
+delay up to 15 seconds. This reduces repeated error requests but does not repair
+camera credentials, absent recorder channels or network connectivity.
+
+For an affected camera, select Raw. If Raw also fails, open /health and inspect
+that camera's connected, last_error and age_seconds values. If Raw works but AI
+waits, inspect ai.last_error and ai.age_seconds plus the backend console. This
+branch runs advanced models synchronously, so multiple visible cameras can wait
+for that work; test with two visible cameras before increasing the grid.
+
+For the channels in the reported screenshot, run this on the backend PC:
+
+```powershell
+$health = Invoke-RestMethod 'http://127.0.0.1:5000/health'
+$health.cameras.'192.168.0.249_ch23' | ConvertTo-Json -Depth 6
+$health.cameras.'192.168.0.252_ch3' | ConvertTo-Json -Depth 6
+```
+
+Share those camera status objects and the backend error if capture still fails.

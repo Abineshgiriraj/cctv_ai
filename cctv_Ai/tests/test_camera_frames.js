@@ -44,7 +44,7 @@ test('hidden camera cannot publish a late frame and releases its blob', async ()
 
 test('HTTP failure is shown and retry can recover', async () => {
   let calls = 0, errors = 0, frames = 0;
-  const {loader} = setup(async () => ++calls === 1 ? {ok: false, status: 503} : response);
+  const {loader} = setup(async () => ++calls === 1 ? {ok: false, status: 503, json: async () => ({error: 'RTSP unavailable'})} : response);
   try {
     loader.add('a', image(), '/snapshot/a', () => frames++, () => errors++);
     await flush();

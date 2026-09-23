@@ -47,7 +47,10 @@
         const response = await this.fetch(`${entry.url}${separator}t=${Date.now()}`, {
           cache: 'no-store', signal: controller.signal
         });
-        if (!response.ok) throw new Error(`Camera frame unavailable (HTTP ${response.status})`);
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.error || `Camera frame unavailable (HTTP ${response.status})`);
+        }
         const blob = await response.blob();
         if (!blob.type.startsWith('image/')) throw new Error('Backend did not return a camera image');
         objectUrl = this.urls.createObjectURL(blob);
@@ -61,10 +64,12 @@
         objectUrl = null;
         if (previous) this.urls.revokeObjectURL(previous);
         entry.due = Date.now() + 100;
-        entry.onFrame();
+        entry.failures = 0;
+        entry.onFrame(response.headers?.get('X-Camera-Frame-Source') || 'unknown');
       } catch (error) {
         if (this.entries.get(key) === entry) {
-          entry.due = Date.now() + 1500;
+          entry.failures = (entry.failures || 0) + 1;
+          entry.due = Date.now() + Math.min(15000, 1500 * 2 ** Math.min(entry.failures - 1, 4));
           entry.onError(error);
         }
       } finally {

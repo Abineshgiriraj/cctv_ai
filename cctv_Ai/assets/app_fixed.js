@@ -119,7 +119,8 @@
 
   function snapshotUrl(img, mode) {
     const url = mode === 'ai' ? img.dataset.aiStreamUrl : img.dataset.rawStreamUrl;
-    return (url || '').replace('/tracked_feed/', '/ai_snapshot/').replace('/video_feed/', '/snapshot/');
+    const endpoint = (url || '').replace('/tracked_feed/', '/ai_snapshot/').replace('/video_feed/', '/snapshot/');
+    return endpoint && mode === 'ai' ? `${endpoint}?fallback=1` : endpoint;
   }
 
   function loadVisibleStream(number) {
@@ -128,10 +129,11 @@
     const mode = img.dataset.streamMode || 'ai';
     const url = snapshotUrl(img, mode);
     if (!url) return;
-    frameLoader.add(`camera-${number}`, img, url, () => {
-      const firstFrame = !img.dataset.frameLoadedAt;
+    frameLoader.add(`camera-${number}`, img, url, source => {
+      const firstFrame = !img.dataset.frameLoadedAt || img.dataset.frameSource !== source;
+      img.dataset.frameSource = source;
       img.dataset.frameLoadedAt = String(Date.now());
-      if (firstFrame) setCameraState(number, true, mode === 'ai' ? 'AI LIVE' : 'RAW LIVE');
+      if (firstFrame) setCameraState(number, true, mode === 'ai' ? (source === 'raw' ? 'RAW LIVE · AI WAIT' : 'AI LIVE') : 'RAW LIVE');
     }, error => {
       delete img.dataset.frameLoadedAt;
       setCameraState(number, false, 'FRAME RETRY');
@@ -516,7 +518,8 @@
         const aiLive = !!(ai.model_loaded && ai.has_frame && !ai.last_error);
         const img = q(`#cameraStream${number}`);
         const mode = img?.dataset.streamMode || 'ai';
-        const selectedLive = (mode === 'ai' ? aiLive : rawLive) && Number(img?.dataset.frameLoadedAt || 0) > Date.now() - 8000;
+        const fallback = mode === 'ai' && img?.dataset.frameSource === 'raw';
+        const selectedLive = (mode === 'ai' && !fallback ? aiLive : rawLive) && Number(img?.dataset.frameLoadedAt || 0) > Date.now() - 8000;
         const active = activeSet.has(key);
 
         if (!active) {
@@ -528,7 +531,7 @@
         if (ai.last_error) aiErrors++;
 
         let state = st.connected ? (mode === 'ai' ? 'ONLINE · AI WAIT' : 'RAW CONNECTING') : 'OFFLINE';
-        if (mode === 'ai' && selectedLive) state = 'AI LIVE';
+        if (mode === 'ai' && selectedLive) state = fallback ? 'RAW LIVE · AI WAIT' : 'AI LIVE';
         if (mode === 'raw' && selectedLive) state = 'RAW LIVE';
         if (mode === 'ai' && ai.last_error) state = 'AI ERROR';
         if (!st.connected && st.last_error) state = 'OFFLINE';

@@ -163,8 +163,8 @@ window.CCTV_UI_CONFIG = {
     cameras: <?= json_encode($cameras, JSON_UNESCAPED_SLASHES) ?>
 };
 </script>
-<script src="assets/camera_frames.js?v=1"></script>
-<script src="assets/app_fixed.js?v=restore-11"></script>
+<script src="assets/camera_frames.js?v=2"></script>
+<script src="assets/app_fixed.js?v=restore-12"></script>
 <?php foreach ($extraScripts as $src): ?>
 <script src="<?= e($src) ?>"></script>
 <?php endforeach; ?>

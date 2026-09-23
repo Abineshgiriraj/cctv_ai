@@ -1003,6 +1003,7 @@ def add_headers(resp):
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Expose-Headers"] = "X-Camera-Frame-Source"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
 
@@ -1199,15 +1200,33 @@ def snapshot(camera_key):
 def ai_snapshot(camera_key):
     if camera_key not in allowed_keys():
         abort(404, description="Camera not configured")
+    now = time.time()
     with lock:
         jpeg = tracked_frames.get(camera_key)
-        err = (ai_status.get(camera_key) or {}).get("last_error")
+        ai = dict(ai_status.get(camera_key) or {})
+        capture = dict(camera_status.get(camera_key) or {})
+        raw = output_frames.get(camera_key)
+    ai_at = ai.get("last_processed_at")
+    raw_at = capture.get("last_frame_at")
+    ai_fresh = ai_at is not None and now - ai_at <= 15
+    raw_fresh = (capture.get("connected") and raw_at is not None
+                 and now - raw_at <= 15)
+    source = "ai"
+    # Opt-in fallback keeps a connected camera visible while AI starts or waits.
+    # Explicitly identify raw frames so the UI never calls them AI detections.
+    if request.args.get("fallback") == "1" and (not jpeg or not ai_fresh):
+        jpeg = raw if raw_fresh else None
+        source = "raw"
     if not jpeg:
+        stage = "ai" if raw_fresh and raw else "capture"
+        error = (ai.get("last_error") if stage == "ai" else capture.get("last_error"))
         return jsonify({
-            "ok": False,
-            "error": err or f"No AI frame available yet from {camera_key}",
+            "ok": False, "camera_key": camera_key, "stage": stage,
+            "raw_available": bool(raw_fresh and raw),
+            "error": error or ("AI frame not ready" if stage == "ai" else
+                               "No fresh camera frame. Check recorder channel, RTSP access and network."),
         }), 503
-    return Response(jpeg, mimetype="image/jpeg")
+    return Response(jpeg, mimetype="image/jpeg", headers={"X-Camera-Frame-Source": source})
 
 
 @app.route("/video_feed/<camera_key>")
@@ -1280,3 +1299,4 @@ if __name__ == "__main__":
         Config.COUNT_LINE_Y_RATIO,
     )
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
